@@ -1,0 +1,29 @@
+name: Auto Phone Shop Post
+
+on:
+  schedule:
+    - cron: '30 23 * * *'   # မြန်မာချိန် မနက် ၆:၀၀
+    - cron: '0 12 * * *'    # မြန်မာချိန် ညနေ ၆:၃၀
+  workflow_dispatch:
+
+jobs:
+  auto-post:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Run Auto Post
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py auto
