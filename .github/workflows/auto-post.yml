@@ -2,8 +2,8 @@ name: Auto Phone Shop Post
 
 on:
   schedule:
-    - cron: '30 23 * * *'   # မြန်မာချိန် မနက် ၆:၀၀
-    - cron: '0 12 * * *'    # မြန်မာချိန် ညနေ ၆:၃၀
+    # မြန်မာချိန် မနက် ၈ နာရီကနေ ည ၈ နာရီထိ တစ်နာရီတစ်ခါ
+    - cron: '0 1-13 * * *'
   workflow_dispatch:
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests flask
       
       - name: Run Auto Post
         env:
