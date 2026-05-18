@@ -91,6 +91,7 @@ def webhook():
         chat_id = msg["chat"]["id"]
         text = msg.get("text", "")
         
+        # /start နဲ့ /help
         if text.startswith("/start") or text.startswith("/help"):
             send_telegram("""🤖 **Phone Shop Bot Commands**
 
@@ -102,18 +103,23 @@ def webhook():
 
 📝 **Post:**
 • `/write [topic]` - Topic ပေးရုံနဲ့ Post ရေးပေးမယ်
+• `/write_topic [နံပါတ်]` - Topic List ထဲက နံပါတ်တစ်ခုကို ရွေးပြီး Post တင်မယ်
 • `/random_post` - Random Topic နဲ့ Post တင်မယ်""", chat_id)
         
+        # /view_topics
         elif text.startswith("/view_topics"):
             topics = load_topics()
             if not topics:
                 send_telegram("📭 Topic မရှိသေးပါ။ `/refresh_topics` နဲ့ အသစ်ထုတ်ပါ။", chat_id)
             else:
                 msg = f"📚 **Topic List** ({len(topics)} ခု)\n\n"
-                for i, t in enumerate(topics[:30]):
+                for i, t in enumerate(topics[:50]):
                     msg += f"{i+1}. {t}\n"
+                if len(topics) > 50:
+                    msg += f"\n...နှင့် နောက်ထပ် {len(topics)-50} ခု"
                 send_telegram(msg, chat_id)
         
+        # /add_topic
         elif text.startswith("/add_topic"):
             topic = text.replace("/add_topic", "").strip()
             if not topic:
@@ -122,6 +128,7 @@ def webhook():
                 success, msg = add_topic(topic)
                 send_telegram(msg, chat_id)
         
+        # /remove_topic
         elif text.startswith("/remove_topic"):
             parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
@@ -130,6 +137,7 @@ def webhook():
                 success, msg = remove_topic(int(parts[1]))
                 send_telegram(msg, chat_id)
         
+        # /refresh_topics
         elif text.startswith("/refresh_topics"):
             send_telegram("🔄 Gemini က Topic အသစ်တွေ ထုတ်နေပါပြီ... ခဏစောင့်ပါ။", chat_id)
             try:
@@ -142,6 +150,7 @@ def webhook():
             except Exception as e:
                 send_telegram(f"❌ Error: {str(e)[:100]}", chat_id)
         
+        # /random_post
         elif text.startswith("/random_post"):
             topics = load_topics()
             if not topics:
@@ -156,6 +165,7 @@ def webhook():
                 except Exception as e:
                     send_telegram(f"❌ Error: {str(e)[:100]}", chat_id)
         
+        # /write [topic]
         elif text.startswith("/write"):
             topic = text.replace("/write", "").strip()
             if not topic:
@@ -168,6 +178,26 @@ def webhook():
                     send_telegram(f"✅ Post တင်ပြီးပါပြီ။\n\n📌 {topic}", chat_id)
                 except Exception as e:
                     send_telegram(f"❌ Error: {str(e)[:100]}", chat_id)
+        
+        # /write_topic [number] - NEW COMMAND
+        elif text.startswith("/write_topic"):
+            parts = text.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                send_telegram("❌ နံပါတ်ထည့်ပေးပါ။\n\nဥပမာ: `/write_topic 3`\n\n`/view_topics` နဲ့ နံပါတ်ကြည့်ပါ။", chat_id)
+            else:
+                index = int(parts[1])
+                topics = load_topics()
+                if 1 <= index <= len(topics):
+                    topic = topics[index - 1]
+                    send_telegram(f"✍️ **Topic #{index}:** {topic}\n\n⏳ Post ရေးနေပါပြီ...", chat_id)
+                    try:
+                        post = generate_post(topic)
+                        send_telegram(post, TELEGRAM_CHAT_ID)
+                        send_telegram(f"✅ Post တင်ပြီးပါပြီ။\n\n📌 {topic}", chat_id)
+                    except Exception as e:
+                        send_telegram(f"❌ Error: {str(e)[:100]}", chat_id)
+                else:
+                    send_telegram(f"❌ နံပါတ် {index} က မရှိပါ။ (၁ မှ {len(topics)} အတွင်း)", chat_id)
     
     return "OK", 200
 
@@ -177,9 +207,14 @@ def run_auto_post():
     topics = load_topics()
     if topics:
         topic = random.choice(topics)
-        post = generate_post(topic)
-        send_telegram(post)
-        print("✅ Done")
+        try:
+            post = generate_post(topic)
+            send_telegram(post)
+            print(f"✅ Posted: {topic[:50]}...")
+        except Exception as e:
+            print(f"Error: {e}")
+    else:
+        print("❌ No topics found")
 
 # ---------------- MAIN ---------------- #
 if __name__ == "__main__":
