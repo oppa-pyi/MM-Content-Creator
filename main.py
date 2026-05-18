@@ -58,10 +58,41 @@ def gemini_request(prompt):
     raise Exception(f"Gemini Error: {response.text}")
 
 def generate_post(topic):
-    prompt = f"""Write a Facebook post about "{topic}" in Myanmar language for a phone shop.
+    """Topic အတွက် Post ရေးမယ်"""
+    
+    # ခင်ဗျားရဲ့ ဆိုင်အချက်အလက်များ (ဒီမှာ ပြင်ပါ)
+    SHOP_INFO = """
+    
+━━━━━━━━━━━━━━━━━━━━━━
+📱 **SUMO MOBILE Monywa**
+📍 ရုံးကြီးလမ်း၊ ရုံးကြီးရပ်၊ မုံရွာမြို့။
+(နာရီစဉ် နှင့်ရွှေစည်းခုံဘုရားတောင်ဘက်လမ်း)
+📞 09 780 780 330, 09 780 780 440
+📍 ဗိုလ်ချုပ်လမ်း၊ အောင်မင်္ဂလာ(၂)လမ်းထိပ်၊ အေးသာယာရပ်၊ မုံရွာမြို့။
+📞 09 796 780 780 / 09 797 780 780
+💬 Viber/Telegram: 09780780440
+🚚 မုံရွာမြို့တွင်း အခမဲ့ပို့ဆောင်ပေး
+━━━━━━━━━━━━━━━━━━━━━━
+"""
+    
+    prompt = f"""Write a Facebook post about the following topic in Myanmar language for a phone shop.
 
-Be friendly, use emojis, 3-5 key points with ✅, end with a question.
-Keep under 1000 characters. No English intro."""
+TOPIC: {topic}
+
+Instructions:
+- Write ONLY about this specific topic: {topic}
+- DO NOT write about the number or index
+- Be friendly, use emojis
+- Include 3-5 key points with ✅ as bullet points
+- End with a question to engage readers
+- Keep under 800 characters
+- No English intro
+- After the post content, add this shop info exactly as shown (do not modify):
+
+{SHOP_INFO}
+
+Start writing directly about: {topic}"""
+    
     return gemini_request(prompt)
 
 def generate_new_topics():
@@ -179,7 +210,7 @@ def webhook():
                 except Exception as e:
                     send_telegram(f"❌ Error: {str(e)[:100]}", chat_id)
         
-        # /write_topic [number] - NEW COMMAND
+        # /write_topic [number] - FIXED VERSION
         elif text.startswith("/write_topic"):
             parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
@@ -189,8 +220,10 @@ def webhook():
                 topics = load_topics()
                 if 1 <= index <= len(topics):
                     topic = topics[index - 1]
+                    # သေချာအောင် Topic ကို ပြီးမှ ခေါ်မယ်
                     send_telegram(f"✍️ **Topic #{index}:** {topic}\n\n⏳ Post ရေးနေပါပြီ...", chat_id)
                     try:
+                        # Topic အပြည့်အစုံကို ထည့်ပြီး Post ရေးမယ်
                         post = generate_post(topic)
                         send_telegram(post, TELEGRAM_CHAT_ID)
                         send_telegram(f"✅ Post တင်ပြီးပါပြီ။\n\n📌 {topic}", chat_id)
