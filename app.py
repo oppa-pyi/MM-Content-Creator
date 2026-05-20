@@ -233,7 +233,7 @@ def webhook():
         text = msg.get("text", "")
 
         # ADMIN PROTECTION
-        if chat_id != str(TELEGRAM_CHAT_ID):
+        if chat_id != str(1917675707):
             return "Unauthorized", 403
 
         logging.info(f"Command: {text}")
