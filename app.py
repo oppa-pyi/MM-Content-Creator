@@ -5,14 +5,9 @@ import urllib.parse
 import time
 import logging
 import sqlite3
-import base64
 import re
-import io
 from datetime import datetime, date
 from flask import Flask, request
-from PIL import Image
-from google import genai
-from google.genai import types
 
 app = Flask(__name__)
 
@@ -37,7 +32,7 @@ def init_db():
     conn.close()
     logging.info("Database ready")
 
-# ---------- TOPIC FUNCTIONS (FIFO auto-remove) ----------
+# ---------- TOPIC FUNCTIONS ----------
 def load_topics():
     if os.path.exists(TOPICS_FILE):
         with open(TOPICS_FILE, "r", encoding="utf-8") as f:
@@ -118,43 +113,16 @@ Requirements:
 - Do NOT use markdown. Just plain text with line breaks."""
     return gemini_text_request(prompt)
 
-# ---------- IMAGEN 3.0 IMAGE GENERATION (Primary) ----------
-def generate_imagen_image(prompt):
-    """Use Google Imagen 3.0 to generate image from text prompt"""
-    try:
-        # Initialize client with API key from environment
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        result = client.models.generate_images(
-            model='imagen-3.0-generate-002',
-            prompt=prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-                aspect_ratio="1:1",
-            )
-        )
-        
-        if result.generated_images:
-            image_bytes = result.generated_images[0].image.image_bytes
-            logging.info("Imagen 3.0 image generated successfully")
-            return image_bytes
-        else:
-            logging.warning("Imagen 3.0 returned no images")
-            return None
-    except Exception as e:
-        logging.error(f"Imagen 3.0 error: {e}")
-        return None
-
-# ---------- FALLBACK IMAGE GENERATORS (Leonardo, Pollinations) ----------
+# ---------- IMAGE GENERATION (Leonardo -> Pollinations -> Imagen) ----------
 def generate_leonardo_image(prompt):
     LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
     if not LEONARDO_API_KEY:
+        logging.info("Leonardo: No API key")
         return None
     url = "https://cloud.leonardo.ai/api/rest/v1/generations"
     headers = {"Authorization": f"Bearer {LEONARDO_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "prompt": prompt,
+        "prompt": prompt[:500],  # Limit prompt length
         "modelId": "b24e16ff-06e3-47eb-8b33-4ed6a5a6c5e9",
         "width": 1024,
         "height": 1024,
@@ -172,7 +140,7 @@ def generate_leonardo_image(prompt):
                     data = res.json()
                     if data["generations_by_pk"]["status"] == "COMPLETE":
                         img_url = data["generations_by_pk"]["generated_images"][0]["url"]
-                        logging.info("Leonardo image generated")
+                        logging.info("Leonardo: Success")
                         return requests.get(img_url, timeout=30).content
                     elif data["generations_by_pk"]["status"] == "FAILED":
                         break
@@ -181,37 +149,65 @@ def generate_leonardo_image(prompt):
     return None
 
 def generate_pollinations_image(prompt):
-    safe = urllib.parse.quote(f"realistic smartphone photo, {prompt}, 4k high quality")
-    url = f"https://image.pollinations.ai/prompt/{safe}?width=1024&height=1024"
+    # Clean prompt for URL
+    safe_prompt = urllib.parse.quote(f"realistic smartphone product photo, {prompt[:200]}, 4k, high quality, natural lighting")
+    url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=1024"
     try:
-        r = requests.get(url, timeout=60)
-        if r.status_code == 200:
-            logging.info("Pollinations image generated")
+        r = requests.get(url, timeout=90)
+        if r.status_code == 200 and len(r.content) > 1000:
+            logging.info("Pollinations: Success")
             return r.content
+        else:
+            logging.warning(f"Pollinations: status {r.status_code}, size {len(r.content) if r.content else 0}")
     except Exception as e:
         logging.error(f"Pollinations error: {e}")
     return None
 
+def generate_imagen_image(prompt):
+    # Imagen 3.0 – keep as last resort
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        result = client.models.generate_images(
+            model='imagen-3.0-generate-002',
+            prompt=prompt[:300],
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                output_mime_type="image/jpeg",
+                aspect_ratio="1:1",
+            )
+        )
+        if result.generated_images:
+            logging.info("Imagen 3.0: Success")
+            return result.generated_images[0].image.image_bytes
+    except Exception as e:
+        logging.error(f"Imagen error: {e}")
+    return None
+
 def generate_image_from_post(post_text):
-    """Try Imagen 3.0 first, then fallback to Leonardo → Pollinations"""
-    # Primary: Imagen 3.0 (best quality)
-    img = generate_imagen_image(post_text)
-    if img:
-        return img
+    """Priority: Leonardo → Pollinations → Imagen"""
+    logging.info("Generating image from post...")
     
-    # Fallback 1: Leonardo
+    # 1. Leonardo
     img = generate_leonardo_image(post_text)
     if img:
         return img
     
-    # Fallback 2: Pollinations
+    # 2. Pollinations (most reliable free option)
     img = generate_pollinations_image(post_text)
     if img:
         return img
     
+    # 3. Imagen (last resort)
+    img = generate_imagen_image(post_text)
+    if img:
+        return img
+    
+    logging.error("All image generators failed")
     return None
 
-# ---------- BULK TOPIC GENERATION (10 topics + auto add) ----------
+# ---------- BULK TOPIC GENERATION ----------
 def generate_topic_batch():
     prompt = """Generate a list of 10 detailed, specific smartphone-related topics for Facebook posts.
 Each topic should be 80-120 characters, Myanmar language, start with an emoji.
@@ -262,13 +258,12 @@ def webhook():
         if chat_id != str(ADMIN_ID):
             return "Unauthorized", 403
         
-        # ----- HELP -----
         if text in ["/start", "/help"]:
             send_telegram(f"""📱 **Commands**
 /view_topics - Topic စာရင်း
 /add_topic [topic] - Topic အသစ် (Auto FIFO max {MAX_TOPICS})
 /remove_topic [num] - Topic ဖျက်
-/write [topic] - Post + Image (Imagen 3.0)
+/write [topic] - Post + Image (Leonardo → Pollinations)
 /write_topic [num] - Topic ရွေးရေး + Image
 /random_post - ကျပန်း + Image
 /generate_topic - AI Topic (၁၀ ခု) + Auto Save
@@ -307,12 +302,11 @@ def webhook():
                     try:
                         post = generate_post(topic)
                         send_telegram(post, chat_id)
-                        # Generate image based on the post content
                         img = generate_image_from_post(post)
                         if img:
                             send_photo(img, post[:200], chat_id)
                         else:
-                            send_telegram("⚠️ No image generated.", chat_id)
+                            send_telegram("⚠️ No image generated. Check logs.", chat_id)
                     except Exception as e:
                         logging.error(f"Write topic error: {e}")
                         send_telegram("❌ Fail", chat_id)
@@ -333,7 +327,7 @@ def webhook():
                     if img:
                         send_photo(img, post[:200], chat_id)
                     else:
-                        send_telegram("⚠️ No image generated.", chat_id)
+                        send_telegram("⚠️ No image generated. Check logs.", chat_id)
                 except Exception as e:
                     logging.error(f"Write custom error: {e}")
                     send_telegram("❌ Fail", chat_id)
@@ -353,7 +347,7 @@ def webhook():
                     if img:
                         send_photo(img, post[:200], chat_id)
                     else:
-                        send_telegram("⚠️ No image generated.", chat_id)
+                        send_telegram("⚠️ No image generated. Check logs.", chat_id)
                 except Exception as e:
                     logging.error(f"Random post error: {e}")
                     send_telegram("❌ Fail", chat_id)
@@ -384,7 +378,6 @@ def webhook():
                 logging.error(f"Generate topic batch error: {e}")
                 send_telegram("❌ Failed to generate topics.", chat_id)
         
-        # ----- STATUS -----
         elif text == "/status":
             topics = load_topics()
             send_telegram(f"🤖 Bot Status\nTopics: {len(topics)} / {MAX_TOPICS}\n✅ Running", chat_id)
