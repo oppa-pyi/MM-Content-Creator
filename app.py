@@ -81,14 +81,14 @@ def get_topics_list():
 def gemini_text_request(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash:generateContent?key={GEMINI_API_KEY}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
-    for _ in range(2):
+    for attempt in range(3):
         try:
             r = requests.post(url, json=data, timeout=60)
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
-            logging.error(f"Gemini text error: {e}")
-        time.sleep(2)
+            logging.error(f"Gemini text error (Attempt {attempt+1}): {e}")
+        time.sleep(3)
     return "AI Error"
 
 # ---------- SHOP INFO ----------
@@ -115,6 +115,36 @@ Requirements:
     return gemini_text_request(prompt)
 
 # ---------- IMAGE GENERATION ----------
+
+def generate_imagen_image(prompt):
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Adding retry logic for Imagen (3 attempts)
+        for attempt in range(3):
+            try:
+                result = client.models.generate_images(
+                    model='imagen-3.0-generate-002',
+                    prompt=prompt[:300],
+                    config=types.GenerateImagesConfig(
+                        number_of_images=1,
+                        output_mime_type="image/jpeg",
+                        aspect_ratio="1:1",
+                    )
+                )
+                if result.generated_images:
+                    logging.info("Imagen 3.0: Success")
+                    return result.generated_images[0].image.image_bytes
+            except Exception as e:
+                logging.warning(f"Imagen attempt {attempt + 1} failed: {e}")
+                time.sleep(4)  # Wait before retrying
+    except ImportError:
+        logging.error("Imagen error: google.genai library not found.")
+    except Exception as e:
+        logging.error(f"Imagen critical error: {e}")
+    return None
 
 def generate_leonardo_image(prompt):
     LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
@@ -167,18 +197,23 @@ def generate_hf_image(prompt):
     hf_prompt = f"smartphone product photo, {prompt[:150]}, 4k, high quality, white background"
 
     for model in models:
-        try:
-            url = f"https://api-inference.huggingface.co/models/{model}"
-            r = requests.post(url, headers=headers,
-                              json={"inputs": hf_prompt},
-                              timeout=90)
-            if r.status_code == 200 and len(r.content) > 1000:
-                logging.info(f"HF ({model}): Success")
-                return r.content
-            else:
-                logging.warning(f"HF ({model}): status {r.status_code}, size {len(r.content) if r.content else 0}")
-        except Exception as e:
-            logging.error(f"HF error ({model}): {e}")
+        url = f"https://api-inference.huggingface.co/models/{model}"
+        # Adding retry logic specifically for Model Loading (503)
+        for attempt in range(4): 
+            try:
+                r = requests.post(url, headers=headers, json={"inputs": hf_prompt}, timeout=90)
+                if r.status_code == 200 and len(r.content) > 1000:
+                    logging.info(f"HF ({model}): Success")
+                    return r.content
+                elif r.status_code == 503:
+                    logging.warning(f"HF ({model}): Model loading (503). Waiting 10s... (Attempt {attempt+1})")
+                    time.sleep(10) # Wait 10 seconds for model to load
+                else:
+                    logging.warning(f"HF ({model}): status {r.status_code}, size {len(r.content) if r.content else 0}")
+                    break # If it's not a 503 error, break and try the next model
+            except Exception as e:
+                logging.error(f"HF error ({model}): {e}")
+                time.sleep(3)
 
     return None
 
@@ -186,57 +221,40 @@ def generate_hf_image(prompt):
 def generate_pollinations_image(prompt):
     safe_prompt = urllib.parse.quote(f"realistic smartphone product photo, {prompt[:80]}, 4k, high quality")
     url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=1024"
-    try:
-        r = requests.get(url, timeout=90)
-        if r.status_code == 200 and len(r.content) > 1000:
-            logging.info("Pollinations: Success")
-            return r.content
-        else:
-            logging.warning(f"Pollinations: status {r.status_code}, size {len(r.content) if r.content else 0}")
-    except Exception as e:
-        logging.error(f"Pollinations error: {e}")
-    return None
-
-
-def generate_imagen_image(prompt):
-    try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        result = client.models.generate_images(
-            model='imagen-3.0-generate-002',
-            prompt=prompt[:300],
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-                aspect_ratio="1:1",
-            )
-        )
-        if result.generated_images:
-            logging.info("Imagen 3.0: Success")
-            return result.generated_images[0].image.image_bytes
-    except Exception as e:
-        logging.error(f"Imagen error: {e}")
+    for attempt in range(2):
+        try:
+            r = requests.get(url, timeout=90)
+            if r.status_code == 200 and len(r.content) > 1000:
+                logging.info("Pollinations: Success")
+                return r.content
+            else:
+                logging.warning(f"Pollinations: status {r.status_code}")
+        except Exception as e:
+            logging.error(f"Pollinations error: {e}")
+            time.sleep(3)
     return None
 
 
 def generate_image_from_post(post_text):
-    """Priority: Leonardo → HF → Pollinations → Imagen"""
+    """Priority: Imagen -> Leonardo -> HF -> Pollinations"""
     logging.info("Generating image from post...")
+    
+    # Clean the prompt (remove newlines and extra spaces) to prevent API JSON parsing errors
+    clean_prompt = post_text.replace('\n', ' ').strip()
 
-    img = generate_leonardo_image(post_text)
+    img = generate_imagen_image(clean_prompt)
     if img:
         return img
 
-    img = generate_hf_image(post_text)
+    img = generate_leonardo_image(clean_prompt)
     if img:
         return img
 
-    img = generate_pollinations_image(post_text)
+    img = generate_hf_image(clean_prompt)
     if img:
         return img
 
-    img = generate_imagen_image(post_text)
+    img = generate_pollinations_image(clean_prompt)
     if img:
         return img
 
