@@ -6,6 +6,7 @@ import time
 import logging
 import sqlite3
 import re
+import threading
 from datetime import datetime, date
 from flask import Flask, request
 
@@ -114,15 +115,12 @@ Requirements:
 - Do NOT use markdown. Just plain text with line breaks."""
     return gemini_text_request(prompt)
 
-# ---------- IMAGE GENERATION ----------
-
+# ---------- IMAGE GENERATION (Fallback Chain) ----------
 def generate_imagen_image(prompt):
     try:
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        # Adding retry logic for Imagen (3 attempts)
         for attempt in range(3):
             try:
                 result = client.models.generate_images(
@@ -139,9 +137,7 @@ def generate_imagen_image(prompt):
                     return result.generated_images[0].image.image_bytes
             except Exception as e:
                 logging.warning(f"Imagen attempt {attempt + 1} failed: {e}")
-                time.sleep(4)  # Wait before retrying
-    except ImportError:
-        logging.error("Imagen error: google.genai library not found.")
+                time.sleep(4)
     except Exception as e:
         logging.error(f"Imagen critical error: {e}")
     return None
@@ -149,7 +145,6 @@ def generate_imagen_image(prompt):
 def generate_leonardo_image(prompt):
     LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
     if not LEONARDO_API_KEY:
-        logging.info("Leonardo: No API key")
         return None
     url = "https://cloud.leonardo.ai/api/rest/v1/generations"
     headers = {"Authorization": f"Bearer {LEONARDO_API_KEY}", "Content-Type": "application/json"}
@@ -175,48 +170,38 @@ def generate_leonardo_image(prompt):
                         logging.info("Leonardo: Success")
                         return requests.get(img_url, timeout=30).content
                     elif data["generations_by_pk"]["status"] == "FAILED":
-                        logging.warning("Leonardo: Generation FAILED")
                         break
     except Exception as e:
         logging.error(f"Leonardo error: {e}")
     return None
 
-
 def generate_hf_image(prompt):
     HF_TOKEN = os.environ.get("HF_TOKEN")
     if not HF_TOKEN:
-        logging.info("HF: No token")
         return None
-
     models = [
         "stabilityai/stable-diffusion-xl-base-1.0",
         "runwayml/stable-diffusion-v1-5",
     ]
-
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     hf_prompt = f"smartphone product photo, {prompt[:150]}, 4k, high quality, white background"
-
     for model in models:
         url = f"https://api-inference.huggingface.co/models/{model}"
-        # Adding retry logic specifically for Model Loading (503)
-        for attempt in range(4): 
+        for attempt in range(4):
             try:
                 r = requests.post(url, headers=headers, json={"inputs": hf_prompt}, timeout=90)
                 if r.status_code == 200 and len(r.content) > 1000:
                     logging.info(f"HF ({model}): Success")
                     return r.content
                 elif r.status_code == 503:
-                    logging.warning(f"HF ({model}): Model loading (503). Waiting 10s... (Attempt {attempt+1})")
-                    time.sleep(10) # Wait 10 seconds for model to load
+                    logging.warning(f"HF ({model}): Loading, waiting 10s...")
+                    time.sleep(10)
                 else:
-                    logging.warning(f"HF ({model}): status {r.status_code}, size {len(r.content) if r.content else 0}")
-                    break # If it's not a 503 error, break and try the next model
+                    break
             except Exception as e:
                 logging.error(f"HF error ({model}): {e}")
                 time.sleep(3)
-
     return None
-
 
 def generate_pollinations_image(prompt):
     safe_prompt = urllib.parse.quote(f"realistic smartphone product photo, {prompt[:80]}, 4k, high quality")
@@ -227,37 +212,22 @@ def generate_pollinations_image(prompt):
             if r.status_code == 200 and len(r.content) > 1000:
                 logging.info("Pollinations: Success")
                 return r.content
-            else:
-                logging.warning(f"Pollinations: status {r.status_code}")
         except Exception as e:
             logging.error(f"Pollinations error: {e}")
             time.sleep(3)
     return None
 
-
 def generate_image_from_post(post_text):
-    """Priority: Imagen -> Leonardo -> HF -> Pollinations"""
     logging.info("Generating image from post...")
-    
-    # Clean the prompt (remove newlines and extra spaces) to prevent API JSON parsing errors
     clean_prompt = post_text.replace('\n', ' ').strip()
-
-    img = generate_imagen_image(clean_prompt)
-    if img:
-        return img
-
-    img = generate_leonardo_image(clean_prompt)
-    if img:
-        return img
-
-    img = generate_hf_image(clean_prompt)
-    if img:
-        return img
-
-    img = generate_pollinations_image(clean_prompt)
-    if img:
-        return img
-
+    clean_prompt = re.sub(r'[^\x00-\x7F]+', ' ', clean_prompt)
+    clean_prompt = ' '.join(clean_prompt.split())
+    short_prompt = f"realistic smartphone product photography, {clean_prompt[:100]}, 4k, high quality, white background, studio lighting"
+    logging.info(f"Image prompt: {short_prompt}")
+    for generator in [generate_imagen_image, generate_leonardo_image, generate_hf_image, generate_pollinations_image]:
+        img = generator(short_prompt)
+        if img:
+            return img
     logging.error("All image generators failed")
     return None
 
@@ -300,20 +270,22 @@ def send_photo(image_bytes, caption, chat_id):
     except Exception as e:
         logging.error(f"Photo send error: {e}")
 
-# ---------- POST HELPER ----------
+# ---------- BACKGROUND POST HANDLER (FIX) ----------
 def handle_post_generation(topic, chat_id):
-    send_telegram(f"⏳ Generating post for: {topic}", chat_id)
-    try:
-        post = generate_post(topic)
-        send_telegram(post, chat_id)
-        img = generate_image_from_post(post)
-        if img:
-            send_photo(img, post[:200], chat_id)
-        else:
-            send_telegram("⚠️ No image generated. Check logs.", chat_id)
-    except Exception as e:
-        logging.error(f"Post generation error: {e}")
-        send_telegram("❌ Fail", chat_id)
+    def task():
+        try:
+            send_telegram(f"⏳ Generating post for: {topic}", chat_id)
+            post = generate_post(topic)
+            send_telegram(post, chat_id)
+            img = generate_image_from_post(post)
+            if img:
+                send_photo(img, post[:200], chat_id)
+            else:
+                send_telegram("⚠️ No image generated. Check logs.", chat_id)
+        except Exception as e:
+            logging.error(f"Post generation error: {e}")
+            send_telegram("❌ Fail", chat_id)
+    threading.Thread(target=task, daemon=True).start()
 
 # ---------- WEBHOOK ----------
 @app.route(f"/webhook/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
@@ -323,7 +295,6 @@ def webhook():
         msg = update["message"]
         chat_id = str(msg["chat"]["id"])
         text = msg.get("text", "")
-
         if chat_id != str(ADMIN_ID):
             return "Unauthorized", 403
 
