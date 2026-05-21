@@ -79,7 +79,7 @@ def get_topics_list():
 
 # ---------- GEMINI TEXT ----------
 def gemini_text_request(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash:generateContent?key={GEMINI_API_KEY}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     for _ in range(2):
         try:
