@@ -80,10 +80,26 @@ def gemini_request(prompt):
             time.sleep(2)
     return "AI Error"
 
+# ---------- SHOP INFO ----------
+def load_shop_info():
+    if os.path.exists("shop_info.txt"):
+        with open("shop_info.txt", "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return "ဆိုင်အချက်အလက် မရှိသေးပါ"
+
 def generate_post(topic):
+    shop_info = load_shop_info()
+    
     prompt = f"""Facebook post ရေးပါ။ Topic: {topic}
-စည်းကမ်း: emoji သုံး၊ bullet 3-5 ခု၊ မြန်မာလို၊ 800 အောက်။
-အဆုံးမှာ 📱 မင်းမင်းဖုန်းဆိုင် ထည့်"""
+
+အောက်ပါဆိုင်အချက်အလက်ကို post ရဲ့အဆုံးမှာ ထည့်ပေးပါ:
+{shop_info}
+
+စည်းကမ်း: 
+- emoji သုံးပါ
+- bullet points 3-5 ခု
+- မြန်မာလို
+- စာလုံးရေ 800 အောက်"""
     return gemini_request(prompt)
 
 def generate_image(prompt):
