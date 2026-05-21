@@ -7,7 +7,6 @@ import logging
 import sqlite3
 from datetime import datetime, date
 from flask import Flask, request
-from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
@@ -17,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-ADMIN_ID = 1917675707
+ADMIN_ID = 1917675707  # ခင်ဗျား User ID ထည့်ပါ
 
 TOPICS_FILE = "topics.txt"
 DB_FILE = "bot_data.db"
@@ -26,11 +25,14 @@ DB_FILE = "bot_data.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, date TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS posts 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, date TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings 
+                 (key TEXT PRIMARY KEY, value TEXT)''')
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_enabled', 'true')")
     conn.commit()
     conn.close()
+    logging.info("Database initialized")
 
 def is_auto_enabled():
     conn = sqlite3.connect(DB_FILE)
@@ -118,22 +120,13 @@ def gemini_request(prompt):
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         except:
             time.sleep(2)
-    raise Exception("Gemini error")
+    return "⚠️ AI Error"
 
-def generate_post(topic, style="fb"):
-    if style == "fb":
-        prompt = f"""မင်းက ဖုန်းဆိုင် page admin။ Facebook post ရေးပါ။
+def generate_post(topic):
+    prompt = f"""မင်းက ဖုန်းဆိုင် page admin။ Facebook post ရေးပါ။
 Topic: {topic}
 စည်းကမ်း: emoji သုံး၊ bullet points 3-5 ခု၊ မြန်မာလို၊ စာလုံး 800 အောက်။
 အဆုံးမှာ 📱 မင်းမင်းဖုန်းဆိုင် - ဖုန်းအသစ်အစစ်များသာ ထည့်"""
-    elif style == "blog":
-        prompt = f"""မင်းက ဖုန်းဆိုင် page admin။ Blog post ရေးပါ (နည်းနည်းရှည်)။
-Topic: {topic}
-စည်းကမ်း: မြန်မာလို၊ အပိုဒ် ၃-၄ ပိုဒ်၊ စာလုံး 1200 အောက်။"""
-    else:  # short
-        prompt = f"""မင်းက ဖုန်းဆိုင် page admin။ Short caption ရေးပါ (Instagram style)။
-Topic: {topic}
-စည်းကမ်း: emoji သုံး၊ စာကြောင်း 2-3 ကြောင်း၊ hashtag 2 ခု။"""
     return gemini_request(prompt)
 
 def generate_image(prompt):
@@ -145,10 +138,6 @@ def generate_image(prompt):
     except:
         return None
 
-def generate_topic():
-    prompt = "Write a short, interesting smartphone topic for Facebook post (max 60 characters, Myanmar language if possible)"
-    return gemini_request(prompt)
-
 # ---------- TELEGRAM ----------
 def send_telegram(text, chat_id):
     if not chat_id:
@@ -156,40 +145,16 @@ def send_telegram(text, chat_id):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": chat_id, "text": text[:4000]}, timeout=30)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Send error: {e}")
 
-def send_photo(image_bytes, caption):
+def send_photo(image_bytes, caption, chat_id):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
                       files={"photo": ("img.jpg", image_bytes)},
-                      data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:200]}, timeout=60)
+                      data={"chat_id": chat_id, "caption": caption[:200]}, timeout=60)
     except:
         pass
-
-# ---------- AUTO POST ----------
-def auto_post():
-    if not is_auto_enabled():
-        return
-    topics = load_topics()
-    available = [t for t in topics if not already_posted_today(t)]
-    topic = random.choice(available if available else topics)
-    try:
-        post = generate_post(topic, "fb")
-        send_telegram(post, TELEGRAM_CHAT_ID)
-        img = generate_image(topic)
-        if img:
-            send_photo(img, topic)
-        mark_posted(topic)
-        logging.info(f"Auto: {topic}")
-    except:
-        pass
-
-# ---------- SCHEDULER ----------
-scheduler = BackgroundScheduler()
-scheduler.add_job(auto_post, "cron", hour=9, minute=0)
-scheduler.add_job(auto_post, "cron", hour=17, minute=0)
-scheduler.start()
 
 # ---------- WEBHOOK ----------
 @app.route(f"/webhook/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
@@ -203,9 +168,11 @@ def webhook():
         if chat_id != str(ADMIN_ID):
             return "Unauthorized", 403
         
+        logging.info(f"Command: {text}")
+        
         # ----- COMMANDS -----
         if text in ["/start", "/help"]:
-            send_telegram("📱 Commands:\n/view_topics\n/add_topic [topic]\n/remove_topic [num]\n/write_fb [topic]\n/write_blog [topic]\n/write_short [topic]\n/write_topic [num]\n/random_post\n/generate_topic\n/status\n/cancel_auto\n/resume_auto", chat_id)
+            send_telegram("📱 Commands:\n/view_topics\n/add_topic [topic]\n/remove_topic [num]\n/write [topic]\n/write_topic [num]\n/random_post\n/status", chat_id)
         
         elif text == "/view_topics":
             send_telegram(get_topics_list(), chat_id)
@@ -237,57 +204,30 @@ def webhook():
                     topic = topics[idx-1]
                     send_telegram(f"⏳ {topic}", chat_id)
                     try:
-                        post = generate_post(topic, "fb")
+                        post = generate_post(topic)
                         send_telegram(post, chat_id)
                         img = generate_image(topic)
                         if img:
-                            send_photo(img, topic)
-                    except:
-                        send_telegram("❌ Fail", chat_id)
+                            send_photo(img, topic, chat_id)
+                    except Exception as e:
+                        send_telegram(f"❌ {e}", chat_id)
                 else:
                     send_telegram("❌ မရှိဘူး", chat_id)
         
-        elif text.startswith("/write_fb"):
-            topic = text.replace("/write_fb", "").strip()
+        elif text.startswith("/write"):
+            topic = text.replace("/write", "").strip()
             if not topic:
-                send_telegram("❌ /write_fb iPhone 16", chat_id)
+                send_telegram("❌ /write iPhone 16", chat_id)
             else:
-                send_telegram(f"⏳ FB style: {topic}", chat_id)
+                send_telegram(f"⏳ {topic}", chat_id)
                 try:
-                    post = generate_post(topic, "fb")
+                    post = generate_post(topic)
                     send_telegram(post, chat_id)
                     img = generate_image(topic)
                     if img:
-                        send_photo(img, topic)
-                except:
-                    send_telegram("❌ Fail", chat_id)
-        
-        elif text.startswith("/write_blog"):
-            topic = text.replace("/write_blog", "").strip()
-            if not topic:
-                send_telegram("❌ /write_blog iPhone 16", chat_id)
-            else:
-                send_telegram(f"⏳ Blog style: {topic}", chat_id)
-                try:
-                    post = generate_post(topic, "blog")
-                    send_telegram(post, chat_id)
-                except:
-                    send_telegram("❌ Fail", chat_id)
-        
-        elif text.startswith("/write_short"):
-            topic = text.replace("/write_short", "").strip()
-            if not topic:
-                send_telegram("❌ /write_short iPhone 16", chat_id)
-            else:
-                send_telegram(f"⏳ Short caption: {topic}", chat_id)
-                try:
-                    post = generate_post(topic, "short")
-                    send_telegram(post, chat_id)
-                    img = generate_image(topic)
-                    if img:
-                        send_photo(img, topic)
-                except:
-                    send_telegram("❌ Fail", chat_id)
+                        send_photo(img, topic, chat_id)
+                except Exception as e:
+                    send_telegram(f"❌ {e}", chat_id)
         
         elif text == "/random_post":
             topics = load_topics()
@@ -297,40 +237,23 @@ def webhook():
                 topic = random.choice(topics)
                 send_telegram(f"🎲 {topic}", chat_id)
                 try:
-                    post = generate_post(topic, "fb")
+                    post = generate_post(topic)
                     send_telegram(post, chat_id)
                     img = generate_image(topic)
                     if img:
-                        send_photo(img, topic)
-                except:
-                    send_telegram("❌ Fail", chat_id)
-        
-        elif text == "/generate_topic":
-            send_telegram("⏳ AI က Topic ထုတ်နေပါတယ်...", chat_id)
-            try:
-                new_topic = generate_topic()
-                send_telegram(f"🤖 AI Topic:\n{new_topic}\n\n/add_topic {new_topic}", chat_id)
-            except:
-                send_telegram("❌ Fail", chat_id)
+                        send_photo(img, topic, chat_id)
+                except Exception as e:
+                    send_telegram(f"❌ {e}", chat_id)
         
         elif text == "/status":
             topics = load_topics()
             today_posts = get_today_post_count()
-            auto_status = "ON" if is_auto_enabled() else "OFF"
-            send_telegram(f"🤖 Status\nTopics: {len(topics)}\nToday: {today_posts}\nAuto: {auto_status}\nSchedule: 9AM & 5PM", chat_id)
-        
-        elif text == "/cancel_auto":
-            set_auto_enabled(False)
-            send_telegram("⏸️ Auto OFF", chat_id)
-        
-        elif text == "/resume_auto":
-            set_auto_enabled(True)
-            send_telegram("▶️ Auto ON", chat_id)
+            send_telegram(f"🤖 Bot Status\nTopics: {len(topics)}\nToday: {today_posts}\n✅ Running", chat_id)
     
     return "OK", 200
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
-    init_db()
+    init_db()  # <-- ဒါကို သေချာထည့်ထားပါ
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
