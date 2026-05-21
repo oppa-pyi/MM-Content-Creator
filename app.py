@@ -115,65 +115,69 @@ Requirements:
 - Do NOT use markdown. Just plain text with line breaks."""
     return gemini_text_request(prompt)
 
-# ---------- IMAGE GENERATION (MeiGen + Gemini Imagen) ----------
+# ---------- IMAGE GENERATION (Fixed: OpenRouter + Pollinations) ----------
+
 def generate_meigen_image(prompt):
-    MEIGEN_TOKEN = os.environ.get("MEIGEN_API_TOKEN")
-    if not MEIGEN_TOKEN:
-        logging.warning("MeiGen token not found")
+    """Generate image using OpenRouter API (Free tier available)"""
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+    if not OPENROUTER_API_KEY:
+        logging.warning("OpenRouter API key not found")
         return None
     
-    url = "https://api.meigen.ai/v1/images/generations"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {MEIGEN_TOKEN}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
+    
+    # Use a free image generation model on OpenRouter
     payload = {
-        "model": "meigen-v1",
-        "prompt": prompt[:500],
-        "n": 1,
-        "size": "1024x1024"
+        "model": "google/gemini-2-flash-exp",  # Free model that can generate images
+        "messages": [
+            {
+                "role": "user",
+                "content": f"Generate an image of: {prompt[:200]}. Return only the image URL."
+            }
+        ]
     }
     
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=30)
         if response.status_code == 200:
             data = response.json()
-            image_url = data.get("data", [{}])[0].get("url")
-            if image_url:
-                img_response = requests.get(image_url, timeout=30)
+            # Extract image URL from response
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if content and content.startswith("http"):
+                img_response = requests.get(content, timeout=30)
                 if img_response.status_code == 200:
-                    logging.info("MeiGen: Success")
+                    logging.info("OpenRouter: Success")
                     return img_response.content
         else:
-            logging.warning(f"MeiGen API error: {response.status_code}")
+            logging.warning(f"OpenRouter API error: {response.status_code}")
     except Exception as e:
-        logging.error(f"MeiGen error: {e}")
+        logging.error(f"OpenRouter error: {e}")
     return None
 
-def generate_imagen_image(prompt):
+def generate_pollinations_image(prompt):
+    """Fallback: Pollinations.ai (Completely free, no API key needed)"""
     try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        # Pollinations API endpoint
+        url = "https://image.pollinations.ai/prompt/"
+        full_prompt = f"realistic smartphone product photography, {prompt[:150]}, 4k, high quality, white background, studio lighting"
+        encoded_prompt = urllib.parse.quote(full_prompt)
+        final_url = f"{url}{encoded_prompt}?width=1024&height=1024&model=flux"
+        
         for attempt in range(3):
             try:
-                result = client.models.generate_images(
-                    model='imagen-3.0-generate-002',
-                    prompt=prompt[:300],
-                    config=types.GenerateImagesConfig(
-                        number_of_images=1,
-                        output_mime_type="image/jpeg",
-                        aspect_ratio="1:1",
-                    )
-                )
-                if result.generated_images:
-                    logging.info("Imagen 3.0: Success")
-                    return result.generated_images[0].image.image_bytes
+                response = requests.get(final_url, timeout=90)
+                if response.status_code == 200 and len(response.content) > 5000:
+                    logging.info(f"Pollinations: Success")
+                    return response.content
             except Exception as e:
-                logging.warning(f"Imagen attempt {attempt + 1} failed: {e}")
-                time.sleep(4)
+                logging.warning(f"Pollinations attempt {attempt + 1} failed: {e}")
+                time.sleep(3)
     except Exception as e:
-        logging.error(f"Imagen critical error: {e}")
+        logging.error(f"Pollinations critical error: {e}")
     return None
 
 def generate_image_from_post(post_text):
@@ -181,12 +185,10 @@ def generate_image_from_post(post_text):
     clean_prompt = post_text.replace('\n', ' ').strip()
     clean_prompt = re.sub(r'[^\x00-\x7F]+', ' ', clean_prompt)
     clean_prompt = ' '.join(clean_prompt.split())
-    short_prompt = f"realistic smartphone product photography, {clean_prompt[:100]}, 4k, high quality, white background, studio lighting"
-    logging.info(f"Image prompt: {short_prompt}")
     
-    # Try MeiGen first, then Imagen
-    for generator in [generate_meigen_image, generate_imagen_image]:
-        img = generator(short_prompt)
+    # Try OpenRouter first (if API key available), then Pollinations
+    for generator in [generate_meigen_image, generate_pollinations_image]:
+        img = generator(clean_prompt)
         if img:
             return img
     logging.error("Both image generators failed")
@@ -231,7 +233,7 @@ def send_photo(image_bytes, caption, chat_id):
     except Exception as e:
         logging.error(f"Photo send error: {e}")
 
-# ---------- BACKGROUND POST HANDLER (FIX) ----------
+# ---------- BACKGROUND POST HANDLER ----------
 def handle_post_generation(topic, chat_id):
     def task():
         try:
