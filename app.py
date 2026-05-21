@@ -19,7 +19,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ADMIN_ID = 1917675707
-MAX_TOPICS = 25  # အများဆုံး Topic အရေအတွက် (ကျော်ရင် အဟောင်းများကို အလိုအလျောက်ဖျက်)
+MAX_TOPICS = 25
 
 TOPICS_FILE = "topics.txt"
 DB_FILE = "bot_data.db"
@@ -33,7 +33,7 @@ def init_db():
     conn.close()
     logging.info("Database ready")
 
-# ---------- TOPIC FUNCTIONS (with auto FIFO removal) ----------
+# ---------- TOPIC FUNCTIONS (with FIFO auto-remove) ----------
 def load_topics():
     if os.path.exists(TOPICS_FILE):
         with open(TOPICS_FILE, "r", encoding="utf-8") as f:
@@ -46,39 +46,20 @@ def save_topics(topics):
             f.write(topic + "\n")
 
 def add_topic(topic, auto_remove=True):
-    """Topic အသစ်ထည့်ပြီး MAX_TOPICS ကျော်ရင် အဟောင်းဆုံးများကို ဖျက်ပေးတယ်"""
     topics = load_topics()
     if topic in topics:
-        return False, "❌ Topic ရှိပြီးသားဖြစ်လို့ မထည့်ပါ။"
-    
+        return False, "❌ Topic ရှိပြီးသား"
     topics.append(topic)
-    
-    # FIFO: အရေအတွက်ကျော်နေရင် အရင်ဆုံး topic များကို ဖျက်မယ်
     removed_count = 0
     if auto_remove and len(topics) > MAX_TOPICS:
         excess = len(topics) - MAX_TOPICS
-        removed_topics = topics[:excess]
+        removed_count = excess
         topics = topics[excess:]
-        removed_count = len(removed_topics)
-    
     save_topics(topics)
-    
     if removed_count > 0:
-        return True, f"✅ Topic ထည့်းပြီး\n{topic}\n\n🗑️ အဟောင်း {removed_count} ခုကို အလိုအလျောက်ဖျက်ပြီးပါပြီ။"
+        return True, f"✅ Topic ထည့်ပြီး\n{topic}\n\n🗑️ အဟောင်း {removed_count} ခု အလိုအလျောက်ဖျက်ပြီး"
     else:
         return True, f"✅ Topic ထည့်ပြီး\n{topic}"
-
-def remove_oldest_topics(count):
-    """အရင်ဆုံး topic count ခုကို ဖျက်ပါ (manual သုံးဖို့)"""
-    topics = load_topics()
-    if count >= len(topics):
-        removed = topics.copy()
-        save_topics([])
-        return removed
-    else:
-        removed = topics[:count]
-        save_topics(topics[count:])
-        return removed
 
 def remove_topic(index):
     topics = load_topics()
@@ -97,8 +78,8 @@ def get_topics_list():
         text += f"{i+1}. {t}\n"
     return text
 
-# ---------- GEMINI ----------
-def gemini_request(prompt):
+# ---------- GEMINI TEXT (3.1 Flash Lite) ----------
+def gemini_text_request(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     for _ in range(2):
@@ -107,7 +88,7 @@ def gemini_request(prompt):
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
-            logging.error(f"Gemini request error: {e}")
+            logging.error(f"Gemini text error: {e}")
         time.sleep(2)
     return "AI Error"
 
@@ -116,23 +97,26 @@ def load_shop_info():
     if os.path.exists("shop_info.txt"):
         with open("shop_info.txt", "r", encoding="utf-8") as f:
             return f.read().strip()
-    return "ဆိုင်အချက်အလက် မရှိသေးပါ"
+    return ""
 
 def generate_post(topic):
     shop_info = load_shop_info()
-    prompt = f"""Facebook post ရေးပါ။ Topic: {topic}
+    prompt = f"""You are a professional Facebook content writer for a phone shop in Myanmar.
+Write a Facebook post about: {topic}
 
-အောက်ပါဆိုင်အချက်အလက်ကို post ရဲ့အဆုံးမှာ ထည့်ပေးပါ:
-{shop_info}
+Requirements:
+- Language: Burmese (Myanmar)
+- Use emojis naturally
+- Include 3-5 bullet points (• or -)
+- Keep under 800 characters
+- Sound friendly and engaging, like a real shop page
+- At the end, include this shop info (if exists): {shop_info}
+- Do NOT use markdown. Just plain text with line breaks."""
+    
+    post = gemini_text_request(prompt)
+    return post
 
-စည်းကမ်း: 
-- emoji သုံးပါ
-- bullet points 3-5 ခု
-- မြန်မာလို
-- စာလုံးရေ 800 အောက်"""
-    return gemini_request(prompt)
-
-# ---------- IMAGE GENERATION FALLBACK ----------
+# ---------- AI IMAGE GENERATION (Using AI-generated post as prompt) ----------
 def generate_gemini_image(prompt):
     if not GEMINI_API_KEY:
         return None
@@ -148,6 +132,7 @@ def generate_gemini_image(prompt):
             data = r.json()
             for part in data["candidates"][0]["content"]["parts"]:
                 if "inlineData" in part and part["inlineData"]["mimeType"].startswith("image/"):
+                    logging.info("Gemini Image generated")
                     return base64.b64decode(part["inlineData"]["data"])
     except Exception as e:
         logging.error(f"Gemini image error: {e}")
@@ -178,6 +163,7 @@ def generate_leonardo_image(prompt):
                     data = res.json()
                     if data["generations_by_pk"]["status"] == "COMPLETE":
                         img_url = data["generations_by_pk"]["generated_images"][0]["url"]
+                        logging.info("Leonardo Image generated")
                         return requests.get(img_url, timeout=30).content
                     elif data["generations_by_pk"]["status"] == "FAILED":
                         break
@@ -186,63 +172,49 @@ def generate_leonardo_image(prompt):
     return None
 
 def generate_pollinations_image(prompt):
-    safe = urllib.parse.quote(f"smartphone advertisement, {prompt}")
+    safe = urllib.parse.quote(f"realistic smartphone photo, {prompt}, 4k high quality")
     url = f"https://image.pollinations.ai/prompt/{safe}?width=1024&height=1024"
     try:
         r = requests.get(url, timeout=60)
-        return r.content if r.status_code == 200 else None
+        if r.status_code == 200:
+            logging.info("Pollinations Image generated")
+            return r.content
     except Exception as e:
         logging.error(f"Pollinations error: {e}")
-        return None
-
-def generate_image_with_fallback(prompt):
-    img = generate_gemini_image(prompt)
-    if img:
-        return img
-    img = generate_leonardo_image(prompt)
-    if img:
-        return img
-    img = generate_pollinations_image(prompt)
-    if img:
-        return img
     return None
 
-def generate_image(prompt):
-    return generate_image_with_fallback(prompt)
+def generate_image_from_post(post_text):
+    """Try to generate image using the actual post content as prompt"""
+    img = generate_gemini_image(post_text)
+    if img: return img
+    img = generate_leonardo_image(post_text)
+    if img: return img
+    img = generate_pollinations_image(post_text)
+    if img: return img
+    return None
 
-# ---------- BULK TOPIC GENERATOR (10 topics at once) & AUTO ADD ----------
+# ---------- BULK TOPIC GENERATION (10 topics + auto add) ----------
 def generate_topic_batch():
     prompt = """Generate a list of 10 detailed, specific smartphone-related topics for Facebook posts.
-Requirements:
-- Each topic should be around 80-120 characters
-- Language: Myanmar (Burmese)
-- Should be informative and practical, like a mini-guide or tip
-- Start each topic with an emoji (📱, 🔋, 📸, 🖥️, ⚡, 🛡️, 💡, etc.)
-- Format: just the list, numbered 1 to 10, each on a new line, nothing else.
-- Example:
+Each topic should be 80-120 characters, Myanmar language, start with an emoji.
+Format: numbered list 1 to 10, nothing else.
+Example:
 1. 📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်
-2. 🔋 Battery health ကောင်းအောင်ထိန်းသိမ်းနည်း
-"""
-    return gemini_request(prompt)
+2. 🔋 Battery health ကောင်းအောင်ထိန်းသိမ်းနည်း"""
+    return gemini_text_request(prompt)
 
 def parse_topic_list(raw_text):
-    """AI ပေးလိုက်တဲ့ text ထဲက topic များကို extract လုပ်မယ်"""
     topics = []
-    lines = raw_text.split('\n')
-    for line in lines:
+    for line in raw_text.split('\n'):
         line = line.strip()
-        # Numbered list: "1. topic text" or "1- topic text"
         match = re.match(r'^\d+[\.\-]\s*(.+)$', line)
         if match:
             topic = match.group(1).strip()
             if topic:
                 topics.append(topic)
-        else:
-            # Fallback: ignore lines without number
-            pass
-    return topics[:10]  # maximum 10
+    return topics[:10]
 
-# ---------- TELEGRAM ----------
+# ---------- TELEGRAM HELPERS ----------
 def send_telegram(text, chat_id):
     if not chat_id:
         return
@@ -255,7 +227,7 @@ def send_telegram(text, chat_id):
 def send_photo(image_bytes, caption, chat_id):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                      files={"photo": ("img.jpg", image_bytes)},
+                      files={"photo": ("image.jpg", image_bytes)},
                       data={"chat_id": chat_id, "caption": caption[:200]}, timeout=60)
     except Exception as e:
         logging.error(f"Photo send error: {e}")
@@ -276,28 +248,25 @@ def webhook():
         if text in ["/start", "/help"]:
             send_telegram(f"""📱 **Commands**
 /view_topics - Topic စာရင်း
-/add_topic [topic] - Topic အသစ် (Auto FIFO: max {MAX_TOPICS})
+/add_topic [topic] - Topic အသစ် (Auto FIFO max {MAX_TOPICS})
 /remove_topic [num] - Topic ဖျက်
-/write [topic] - Post ရေး
-/write_topic [num] - Topic ရွေးရေး
-/random_post - ကျပန်း
-/generate_topic - AI Topic (၁၀ ခု) အသစ် + Auto Save
+/write [topic] - Post + Image (AI based)
+/write_topic [num] - Topic ရွေးရေး + Image
+/random_post - ကျပန်း + Image
+/generate_topic - AI Topic (၁၀ ခု) + Auto Save
 /status - Bot အခြေအနေ""", chat_id)
         
-        # ----- VIEW -----
         elif text == "/view_topics":
             send_telegram(get_topics_list(), chat_id)
         
-        # ----- ADD -----
         elif text.startswith("/add_topic"):
             param = text.replace("/add_topic", "").strip()
             if not param:
-                send_telegram("❌ /add_topic [topic]\n\nExample: /add_topic 📱 ဖုန်းဘက်ထရီ အကြောင်း", chat_id)
+                send_telegram("❌ /add_topic [topic]", chat_id)
             else:
                 ok, msg = add_topic(param)
                 send_telegram(msg, chat_id)
         
-        # ----- REMOVE -----
         elif text.startswith("/remove_topic"):
             parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
@@ -316,18 +285,19 @@ def webhook():
                 idx = int(parts[1])
                 if 1 <= idx <= len(topics):
                     topic = topics[idx-1]
-                    send_telegram(f"⏳ {topic}", chat_id)
+                    send_telegram(f"⏳ Generating post for: {topic}", chat_id)
                     try:
                         post = generate_post(topic)
                         send_telegram(post, chat_id)
-                        img = generate_image(topic)
+                        # Generate image based on the AI-generated post content
+                        img = generate_image_from_post(post)
                         if img:
-                            send_photo(img, topic, chat_id)
+                            send_photo(img, post[:200], chat_id)
                     except Exception as e:
                         logging.error(f"Write topic error: {e}")
                         send_telegram("❌ Fail", chat_id)
                 else:
-                    send_telegram("❌ မရှိဘူး", chat_id)
+                    send_telegram("❌ Topic not found", chat_id)
         
         # ----- WRITE CUSTOM -----
         elif text.startswith("/write"):
@@ -335,13 +305,13 @@ def webhook():
             if not topic:
                 send_telegram("❌ /write iPhone 16", chat_id)
             else:
-                send_telegram(f"⏳ {topic}", chat_id)
+                send_telegram(f"⏳ Generating post for: {topic}", chat_id)
                 try:
                     post = generate_post(topic)
                     send_telegram(post, chat_id)
-                    img = generate_image(topic)
+                    img = generate_image_from_post(post)
                     if img:
-                        send_photo(img, topic, chat_id)
+                        send_photo(img, post[:200], chat_id)
                 except Exception as e:
                     logging.error(f"Write custom error: {e}")
                     send_telegram("❌ Fail", chat_id)
@@ -350,66 +320,50 @@ def webhook():
         elif text == "/random_post":
             topics = load_topics()
             if not topics:
-                send_telegram("❌ Topic မရှိဘူး", chat_id)
+                send_telegram("❌ Topic list empty", chat_id)
             else:
                 topic = random.choice(topics)
-                send_telegram(f"🎲 {topic}", chat_id)
+                send_telegram(f"🎲 Random topic: {topic}", chat_id)
                 try:
                     post = generate_post(topic)
                     send_telegram(post, chat_id)
-                    img = generate_image(topic)
+                    img = generate_image_from_post(post)
                     if img:
-                        send_photo(img, topic, chat_id)
+                        send_photo(img, post[:200], chat_id)
                 except Exception as e:
                     logging.error(f"Random post error: {e}")
                     send_telegram("❌ Fail", chat_id)
         
-        # ----- GENERATE TOPIC (BATCH OF 10) + AUTO ADD -----
+        # ----- GENERATE BATCH TOPICS + AUTO ADD -----
         elif text == "/generate_topic":
-            send_telegram("⏳ AI က Topic စာရင်း (၁၀ ခု) ထုတ်နေပါတယ်...", chat_id)
+            send_telegram("⏳ AI is generating 10 new topics...", chat_id)
             try:
-                raw_batch = generate_topic_batch()
-                topics_list = parse_topic_list(raw_batch)
-                
+                raw = generate_topic_batch()
+                topics_list = parse_topic_list(raw)
                 if not topics_list:
-                    send_telegram("❌ AI မှ Topic စာရင်း ပြန်မပို့နိုင်ပါ။ နောက်တစ်ခါ ထပ်ကြိုးစားပါ။", chat_id)
+                    send_telegram("❌ Could not parse AI topics. Try again.", chat_id)
                     return
-                
                 added = 0
-                duplicates = 0
                 added_topics = []
                 for t in topics_list:
-                    ok, msg = add_topic(t, auto_remove=True)
+                    ok, _ = add_topic(t, auto_remove=True)
                     if ok:
                         added += 1
                         added_topics.append(t)
-                    else:
-                        duplicates += 1
-                
-                result_msg = f"🤖 **AI Topic Generator**\n\n"
-                result_msg += f"✅ အသစ်ထည့်ပြီးသော Topic: {added} ခု\n"
-                if duplicates > 0:
-                    result_msg += f"⚠️ ထပ်နေသော Topic: {duplicates} ခု\n"
-                result_msg += f"📚 လက်ရှိ စုစုပေါင်း: {len(load_topics())} / {MAX_TOPICS}\n\n"
-                
-                # Show first 5 added topics
-                if added_topics:
-                    result_msg += f"**အသစ်ထည့်ထားသော Topic များ (ပထမ ၅ ခု):**\n"
-                    for i, t in enumerate(added_topics[:5], 1):
-                        result_msg += f"{i}. {t}\n"
-                    if len(added_topics) > 5:
-                        result_msg += f"... နှင့် {len(added_topics)-5} ခု\n"
-                
-                send_telegram(result_msg, chat_id)
-                
+                msg = f"🤖 **AI Topic Generator**\n✅ Added {added} new topics.\n📚 Total: {len(load_topics())} / {MAX_TOPICS}\n\n**New topics:**\n"
+                for i, t in enumerate(added_topics[:5], 1):
+                    msg += f"{i}. {t}\n"
+                if len(added_topics) > 5:
+                    msg += f"... and {len(added_topics)-5} more."
+                send_telegram(msg, chat_id)
             except Exception as e:
-                logging.error(f"Generate topic list error: {e}")
-                send_telegram("❌ Topic စာရင်း ထုတ်လို့မရပါ။ နောက်တစ်ခါ ထပ်ကြိုးစားပါ။", chat_id)
+                logging.error(f"Generate topic batch error: {e}")
+                send_telegram("❌ Failed to generate topics.", chat_id)
         
         # ----- STATUS -----
         elif text == "/status":
             topics = load_topics()
-            send_telegram(f"🤖 Status\nTopics: {len(topics)} / {MAX_TOPICS}\n✅ Running", chat_id)
+            send_telegram(f"🤖 Bot Status\nTopics: {len(topics)} / {MAX_TOPICS}\n✅ Running", chat_id)
     
     return "OK", 200
 
