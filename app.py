@@ -5,6 +5,7 @@ import urllib.parse
 import time
 import logging
 import sqlite3
+import base64
 from datetime import datetime, date
 from flask import Flask, request
 
@@ -28,7 +29,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, date TEXT)''')
     conn.commit()
     conn.close()
-    print("Database ready")
+    logging.info("Database ready")
 
 # ---------- TOPIC FUNCTIONS ----------
 def load_topics():
@@ -69,15 +70,16 @@ def get_topics_list():
 
 # ---------- GEMINI ----------
 def gemini_request(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite-001:generateContent?key={GEMINI_API_KEY}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     for _ in range(2):
         try:
             r = requests.post(url, json=data, timeout=60)
             if r.status_code == 200:
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except:
-            time.sleep(2)
+        except Exception as e:
+            logging.error(f"Gemini request error: {e}")
+        time.sleep(2)
     return "AI Error"
 
 # ---------- SHOP INFO ----------
@@ -89,7 +91,6 @@ def load_shop_info():
 
 def generate_post(topic):
     shop_info = load_shop_info()
-    
     prompt = f"""Facebook post ရေးပါ။ Topic: {topic}
 
 အောက်ပါဆိုင်အချက်အလက်ကို post ရဲ့အဆုံးမှာ ထည့်ပေးပါ:
@@ -102,11 +103,8 @@ def generate_post(topic):
 - စာလုံးရေ 800 အောက်"""
     return gemini_request(prompt)
 
-import base64
-import time
-
+# ---------- IMAGE GENERATION FALLBACK ----------
 def generate_gemini_image(prompt):
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
@@ -123,7 +121,7 @@ def generate_gemini_image(prompt):
                 if "inlineData" in part and part["inlineData"]["mimeType"].startswith("image/"):
                     return base64.b64decode(part["inlineData"]["data"])
     except Exception as e:
-        print(f"Gemini error: {e}")
+        logging.error(f"Gemini image error: {e}")
     return None
 
 def generate_leonardo_image(prompt):
@@ -155,7 +153,7 @@ def generate_leonardo_image(prompt):
                     elif data["generations_by_pk"]["status"] == "FAILED":
                         break
     except Exception as e:
-        print(f"Leonardo error: {e}")
+        logging.error(f"Leonardo error: {e}")
     return None
 
 def generate_pollinations_image(prompt):
@@ -165,7 +163,7 @@ def generate_pollinations_image(prompt):
         r = requests.get(url, timeout=60)
         return r.content if r.status_code == 200 else None
     except Exception as e:
-        print(f"Pollinations error: {e}")
+        logging.error(f"Pollinations error: {e}")
         return None
 
 def generate_image_with_fallback(prompt):
@@ -182,8 +180,16 @@ def generate_image_with_fallback(prompt):
 
 def generate_image(prompt):
     return generate_image_with_fallback(prompt)
+
+# ---------- AI TOPIC GENERATOR (FIXED) ----------
 def generate_new_topic():
-    prompt = "Write a short smartphone topic for Facebook post (max 60 chars, Myanmar language)"
+    prompt = """Generate a short, specific smartphone-related topic for a Facebook post.
+Rules:
+- Must be a topic, not a full sentence or call-to-action
+- Max 60 characters
+- Myanmar language (Burmese)
+- Example: "📱 ဖုန်းဘက်ထရီ ကြာရှည်ခံအောင် ထိန်းသိမ်းနည်း"
+- Return ONLY the topic, nothing else."""
     return gemini_request(prompt)
 
 # ---------- TELEGRAM ----------
@@ -193,16 +199,16 @@ def send_telegram(text, chat_id):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": chat_id, "text": text[:4000]}, timeout=30)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Telegram send error: {e}")
 
 def send_photo(image_bytes, caption, chat_id):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
                       files={"photo": ("img.jpg", image_bytes)},
                       data={"chat_id": chat_id, "caption": caption[:200]}, timeout=60)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Photo send error: {e}")
 
 # ---------- WEBHOOK ----------
 @app.route(f"/webhook/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
@@ -267,7 +273,8 @@ def webhook():
                         img = generate_image(topic)
                         if img:
                             send_photo(img, topic, chat_id)
-                    except:
+                    except Exception as e:
+                        logging.error(f"Write topic error: {e}")
                         send_telegram("❌ Fail", chat_id)
                 else:
                     send_telegram("❌ မရှိဘူး", chat_id)
@@ -285,7 +292,8 @@ def webhook():
                     img = generate_image(topic)
                     if img:
                         send_photo(img, topic, chat_id)
-                except:
+                except Exception as e:
+                    logging.error(f"Write custom error: {e}")
                     send_telegram("❌ Fail", chat_id)
         
         # ----- RANDOM -----
@@ -302,7 +310,8 @@ def webhook():
                     img = generate_image(topic)
                     if img:
                         send_photo(img, topic, chat_id)
-                except:
+                except Exception as e:
+                    logging.error(f"Random post error: {e}")
                     send_telegram("❌ Fail", chat_id)
         
         # ----- GENERATE TOPIC (AI) -----
@@ -311,7 +320,8 @@ def webhook():
             try:
                 new_topic = generate_new_topic()
                 send_telegram(f"🤖 {new_topic}\n\n/add_topic {new_topic}", chat_id)
-            except:
+            except Exception as e:
+                logging.error(f"Generate topic error: {e}")
                 send_telegram("❌ Fail", chat_id)
         
         # ----- STATUS -----
