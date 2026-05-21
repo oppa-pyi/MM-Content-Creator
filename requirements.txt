@@ -4,3 +4,4 @@ gunicorn
 apscheduler
 Pillow
 google-generativeai
+google-genai
