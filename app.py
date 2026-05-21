@@ -7,8 +7,12 @@ import logging
 import sqlite3
 import base64
 import re
+import io
 from datetime import datetime, date
 from flask import Flask, request
+from PIL import Image
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 
@@ -33,7 +37,7 @@ def init_db():
     conn.close()
     logging.info("Database ready")
 
-# ---------- TOPIC FUNCTIONS (with FIFO auto-remove) ----------
+# ---------- TOPIC FUNCTIONS (FIFO auto-remove) ----------
 def load_topics():
     if os.path.exists(TOPICS_FILE):
         with open(TOPICS_FILE, "r", encoding="utf-8") as f:
@@ -112,32 +116,37 @@ Requirements:
 - Sound friendly and engaging, like a real shop page
 - At the end, include this shop info (if exists): {shop_info}
 - Do NOT use markdown. Just plain text with line breaks."""
-    
-    post = gemini_text_request(prompt)
-    return post
+    return gemini_text_request(prompt)
 
-# ---------- AI IMAGE GENERATION (Using AI-generated post as prompt) ----------
-def generate_gemini_image(prompt):
-    if not GEMINI_API_KEY:
-        return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]}
-    }
+# ---------- IMAGEN 3.0 IMAGE GENERATION (Primary) ----------
+def generate_imagen_image(prompt):
+    """Use Google Imagen 3.0 to generate image from text prompt"""
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
-        if r.status_code == 200:
-            data = r.json()
-            for part in data["candidates"][0]["content"]["parts"]:
-                if "inlineData" in part and part["inlineData"]["mimeType"].startswith("image/"):
-                    logging.info("Gemini Image generated")
-                    return base64.b64decode(part["inlineData"]["data"])
+        # Initialize client with API key from environment
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        result = client.models.generate_images(
+            model='imagen-3.0-generate-002',
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                output_mime_type="image/jpeg",
+                aspect_ratio="1:1",
+            )
+        )
+        
+        if result.generated_images:
+            image_bytes = result.generated_images[0].image.image_bytes
+            logging.info("Imagen 3.0 image generated successfully")
+            return image_bytes
+        else:
+            logging.warning("Imagen 3.0 returned no images")
+            return None
     except Exception as e:
-        logging.error(f"Gemini image error: {e}")
-    return None
+        logging.error(f"Imagen 3.0 error: {e}")
+        return None
 
+# ---------- FALLBACK IMAGE GENERATORS (Leonardo, Pollinations) ----------
 def generate_leonardo_image(prompt):
     LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
     if not LEONARDO_API_KEY:
@@ -163,7 +172,7 @@ def generate_leonardo_image(prompt):
                     data = res.json()
                     if data["generations_by_pk"]["status"] == "COMPLETE":
                         img_url = data["generations_by_pk"]["generated_images"][0]["url"]
-                        logging.info("Leonardo Image generated")
+                        logging.info("Leonardo image generated")
                         return requests.get(img_url, timeout=30).content
                     elif data["generations_by_pk"]["status"] == "FAILED":
                         break
@@ -177,20 +186,29 @@ def generate_pollinations_image(prompt):
     try:
         r = requests.get(url, timeout=60)
         if r.status_code == 200:
-            logging.info("Pollinations Image generated")
+            logging.info("Pollinations image generated")
             return r.content
     except Exception as e:
         logging.error(f"Pollinations error: {e}")
     return None
 
 def generate_image_from_post(post_text):
-    """Try to generate image using the actual post content as prompt"""
-    img = generate_gemini_image(post_text)
-    if img: return img
+    """Try Imagen 3.0 first, then fallback to Leonardo → Pollinations"""
+    # Primary: Imagen 3.0 (best quality)
+    img = generate_imagen_image(post_text)
+    if img:
+        return img
+    
+    # Fallback 1: Leonardo
     img = generate_leonardo_image(post_text)
-    if img: return img
+    if img:
+        return img
+    
+    # Fallback 2: Pollinations
     img = generate_pollinations_image(post_text)
-    if img: return img
+    if img:
+        return img
+    
     return None
 
 # ---------- BULK TOPIC GENERATION (10 topics + auto add) ----------
@@ -250,7 +268,7 @@ def webhook():
 /view_topics - Topic စာရင်း
 /add_topic [topic] - Topic အသစ် (Auto FIFO max {MAX_TOPICS})
 /remove_topic [num] - Topic ဖျက်
-/write [topic] - Post + Image (AI based)
+/write [topic] - Post + Image (Imagen 3.0)
 /write_topic [num] - Topic ရွေးရေး + Image
 /random_post - ကျပန်း + Image
 /generate_topic - AI Topic (၁၀ ခု) + Auto Save
@@ -289,10 +307,12 @@ def webhook():
                     try:
                         post = generate_post(topic)
                         send_telegram(post, chat_id)
-                        # Generate image based on the AI-generated post content
+                        # Generate image based on the post content
                         img = generate_image_from_post(post)
                         if img:
                             send_photo(img, post[:200], chat_id)
+                        else:
+                            send_telegram("⚠️ No image generated.", chat_id)
                     except Exception as e:
                         logging.error(f"Write topic error: {e}")
                         send_telegram("❌ Fail", chat_id)
@@ -312,6 +332,8 @@ def webhook():
                     img = generate_image_from_post(post)
                     if img:
                         send_photo(img, post[:200], chat_id)
+                    else:
+                        send_telegram("⚠️ No image generated.", chat_id)
                 except Exception as e:
                     logging.error(f"Write custom error: {e}")
                     send_telegram("❌ Fail", chat_id)
@@ -330,6 +352,8 @@ def webhook():
                     img = generate_image_from_post(post)
                     if img:
                         send_photo(img, post[:200], chat_id)
+                    else:
+                        send_telegram("⚠️ No image generated.", chat_id)
                 except Exception as e:
                     logging.error(f"Random post error: {e}")
                     send_telegram("❌ Fail", chat_id)
