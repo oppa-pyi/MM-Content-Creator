@@ -103,6 +103,7 @@ def generate_post(topic):
     return gemini_request(prompt)
 
 import base64
+import time
 
 def generate_gemini_image(prompt):
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -121,8 +122,8 @@ def generate_gemini_image(prompt):
             for part in data["candidates"][0]["content"]["parts"]:
                 if "inlineData" in part and part["inlineData"]["mimeType"].startswith("image/"):
                     return base64.b64decode(part["inlineData"]["data"])
-    except:
-        pass
+    except Exception as e:
+        print(f"Gemini error: {e}")
     return None
 
 def generate_leonardo_image(prompt):
@@ -153,8 +154,8 @@ def generate_leonardo_image(prompt):
                         return requests.get(img_url, timeout=30).content
                     elif data["generations_by_pk"]["status"] == "FAILED":
                         break
-    except:
-        pass
+    except Exception as e:
+        print(f"Leonardo error: {e}")
     return None
 
 def generate_pollinations_image(prompt):
@@ -163,21 +164,24 @@ def generate_pollinations_image(prompt):
     try:
         r = requests.get(url, timeout=60)
         return r.content if r.status_code == 200 else None
-    except:
+    except Exception as e:
+        print(f"Pollinations error: {e}")
         return None
 
 def generate_image_with_fallback(prompt):
     img = generate_gemini_image(prompt)
-    if img: return img
+    if img:
+        return img
     img = generate_leonardo_image(prompt)
-    if img: return img
+    if img:
+        return img
     img = generate_pollinations_image(prompt)
-    if img: return img
+    if img:
+        return img
     return None
 
 def generate_image(prompt):
     return generate_image_with_fallback(prompt)
-
 def generate_new_topic():
     prompt = "Write a short smartphone topic for Facebook post (max 60 chars, Myanmar language)"
     return gemini_request(prompt)
