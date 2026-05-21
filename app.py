@@ -102,14 +102,81 @@ def generate_post(topic):
 - စာလုံးရေ 800 အောက်"""
     return gemini_request(prompt)
 
-def generate_image(prompt):
-    safe = urllib.parse.quote(f"smartphone, {prompt}")
+import base64
+
+def generate_gemini_image(prompt):
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+    if not GEMINI_API_KEY:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]}
+    }
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        if r.status_code == 200:
+            data = r.json()
+            for part in data["candidates"][0]["content"]["parts"]:
+                if "inlineData" in part and part["inlineData"]["mimeType"].startswith("image/"):
+                    return base64.b64decode(part["inlineData"]["data"])
+    except:
+        pass
+    return None
+
+def generate_leonardo_image(prompt):
+    LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
+    if not LEONARDO_API_KEY:
+        return None
+    url = "https://cloud.leonardo.ai/api/rest/v1/generations"
+    headers = {"Authorization": f"Bearer {LEONARDO_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "prompt": prompt,
+        "modelId": "b24e16ff-06e3-47eb-8b33-4ed6a5a6c5e9",
+        "width": 1024,
+        "height": 1024,
+        "num_images": 1,
+        "presetStyle": "DYNAMIC"
+    }
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+        if r.status_code == 200:
+            gen_id = r.json()["sdGenerationJob"]["generationId"]
+            for _ in range(15):
+                time.sleep(2)
+                res = requests.get(f"https://cloud.leonardo.ai/api/rest/v1/generations/{gen_id}", headers=headers)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data["generations_by_pk"]["status"] == "COMPLETE":
+                        img_url = data["generations_by_pk"]["generated_images"][0]["url"]
+                        return requests.get(img_url, timeout=30).content
+                    elif data["generations_by_pk"]["status"] == "FAILED":
+                        break
+    except:
+        pass
+    return None
+
+def generate_pollinations_image(prompt):
+    safe = urllib.parse.quote(f"smartphone advertisement, {prompt}")
     url = f"https://image.pollinations.ai/prompt/{safe}?width=1024&height=1024"
     try:
         r = requests.get(url, timeout=60)
         return r.content if r.status_code == 200 else None
     except:
         return None
+
+def generate_image_with_fallback(prompt):
+    img = generate_gemini_image(prompt)
+    if img: return img
+    img = generate_leonardo_image(prompt)
+    if img: return img
+    img = generate_pollinations_image(prompt)
+    if img: return img
+    return None
+
+def generate_image(prompt):
+    return generate_image_with_fallback(prompt)
 
 def generate_new_topic():
     prompt = "Write a short smartphone topic for Facebook post (max 60 chars, Myanmar language)"
