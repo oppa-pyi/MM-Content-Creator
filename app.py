@@ -7,6 +7,8 @@ import logging
 import sqlite3
 import re
 import threading
+import json
+import subprocess
 from datetime import datetime, date
 from flask import Flask, request
 
@@ -115,106 +117,24 @@ Requirements:
 - Do NOT use markdown. Just plain text with line breaks."""
     return gemini_text_request(prompt)
 
-# ---------- IMAGE GENERATION (Fallback Chain) ----------
-def generate_imagen_image(prompt):
+# ---------- IMAGE GENERATION (ClawHub Toolkit) ----------
+def generate_claw_image(prompt):
+    logging.info("Generating image via OpenClaw creative-toolkit...")
+    safe_prompt = prompt.replace('"', '\\"') 
+    command = f'claw run creative-toolkit:generate --prompt "{safe_prompt}"'
+    
     try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        for attempt in range(3):
-            try:
-                result = client.models.generate_images(
-                    model='imagen-3.0-generate-002',
-                    prompt=prompt[:300],
-                    config=types.GenerateImagesConfig(
-                        number_of_images=1,
-                        output_mime_type="image/jpeg",
-                        aspect_ratio="1:1",
-                    )
-                )
-                if result.generated_images:
-                    logging.info("Imagen 3.0: Success")
-                    return result.generated_images[0].image.image_bytes
-            except Exception as e:
-                logging.warning(f"Imagen attempt {attempt + 1} failed: {e}")
-                time.sleep(4)
-    except Exception as e:
-        logging.error(f"Imagen critical error: {e}")
-    return None
-
-def generate_leonardo_image(prompt):
-    LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
-    if not LEONARDO_API_KEY:
-        return None
-    url = "https://cloud.leonardo.ai/api/rest/v1/generations"
-    headers = {"Authorization": f"Bearer {LEONARDO_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "prompt": prompt[:500],
-        "modelId": "b24e16ff-06e3-47eb-8b33-4ed6a5a6c5e9",
-        "width": 1024,
-        "height": 1024,
-        "num_images": 1,
-        "presetStyle": "DYNAMIC"
-    }
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
-        if r.status_code == 200:
-            gen_id = r.json()["sdGenerationJob"]["generationId"]
-            for _ in range(20):
-                time.sleep(3)
-                res = requests.get(f"https://cloud.leonardo.ai/api/rest/v1/generations/{gen_id}", headers=headers)
-                if res.status_code == 200:
-                    data = res.json()
-                    if data["generations_by_pk"]["status"] == "COMPLETE":
-                        img_url = data["generations_by_pk"]["generated_images"][0]["url"]
-                        logging.info("Leonardo: Success")
-                        return requests.get(img_url, timeout=30).content
-                    elif data["generations_by_pk"]["status"] == "FAILED":
-                        break
-    except Exception as e:
-        logging.error(f"Leonardo error: {e}")
-    return None
-
-def generate_hf_image(prompt):
-    HF_TOKEN = os.environ.get("HF_TOKEN")
-    if not HF_TOKEN:
-        return None
-    models = [
-        "stabilityai/stable-diffusion-xl-base-1.0",
-        "runwayml/stable-diffusion-v1-5",
-    ]
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    hf_prompt = f"smartphone product photo, {prompt[:150]}, 4k, high quality, white background"
-    for model in models:
-        url = f"https://api-inference.huggingface.co/models/{model}"
-        for attempt in range(4):
-            try:
-                r = requests.post(url, headers=headers, json={"inputs": hf_prompt}, timeout=90)
-                if r.status_code == 200 and len(r.content) > 1000:
-                    logging.info(f"HF ({model}): Success")
-                    return r.content
-                elif r.status_code == 503:
-                    logging.warning(f"HF ({model}): Loading, waiting 10s...")
-                    time.sleep(10)
-                else:
-                    break
-            except Exception as e:
-                logging.error(f"HF error ({model}): {e}")
-                time.sleep(3)
-    return None
-
-def generate_pollinations_image(prompt):
-    safe_prompt = urllib.parse.quote(f"realistic smartphone product photo, {prompt[:80]}, 4k, high quality")
-    url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=1024"
-    for attempt in range(2):
-        try:
-            r = requests.get(url, timeout=90)
-            if r.status_code == 200 and len(r.content) > 1000:
-                logging.info("Pollinations: Success")
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        output_data = json.loads(result.stdout)
+        image_url = output_data.get('image_url')
+        
+        if image_url:
+            r = requests.get(image_url, timeout=30)
+            if r.status_code == 200:
+                logging.info("Claw Toolkit: Success")
                 return r.content
-        except Exception as e:
-            logging.error(f"Pollinations error: {e}")
-            time.sleep(3)
+    except Exception as e:
+        logging.error(f"Claw Toolkit error: {e}")
     return None
 
 def generate_image_from_post(post_text):
@@ -224,12 +144,8 @@ def generate_image_from_post(post_text):
     clean_prompt = ' '.join(clean_prompt.split())
     short_prompt = f"realistic smartphone product photography, {clean_prompt[:100]}, 4k, high quality, white background, studio lighting"
     logging.info(f"Image prompt: {short_prompt}")
-    for generator in [generate_imagen_image, generate_leonardo_image, generate_hf_image, generate_pollinations_image]:
-        img = generator(short_prompt)
-        if img:
-            return img
-    logging.error("All image generators failed")
-    return None
+    
+    return generate_claw_image(short_prompt)
 
 # ---------- BULK TOPIC GENERATION ----------
 def generate_topic_batch():
