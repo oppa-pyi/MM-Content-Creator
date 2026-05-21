@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-ADMIN_ID = 1917675707  # ခင်ဗျား User ID ထည့်ပါ
+ADMIN_ID = 1917675707
 
 TOPICS_FILE = "topics.txt"
 DB_FILE = "bot_data.db"
@@ -25,59 +25,17 @@ DB_FILE = "bot_data.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS posts 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, date TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS settings 
-                 (key TEXT PRIMARY KEY, value TEXT)''')
-    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_enabled', 'true')")
+    c.execute('''CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, date TEXT)''')
     conn.commit()
     conn.close()
-    logging.info("Database initialized")
-
-def is_auto_enabled():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT value FROM settings WHERE key='auto_enabled'")
-    result = c.fetchone()
-    conn.close()
-    return result[0] == 'true' if result else True
-
-def set_auto_enabled(enabled):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE settings SET value=? WHERE key='auto_enabled'", ('true' if enabled else 'false',))
-    conn.commit()
-    conn.close()
-
-def already_posted_today(topic):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM posts WHERE topic=? AND date=?", (topic, date.today().isoformat()))
-    exists = c.fetchone() is not None
-    conn.close()
-    return exists
-
-def mark_posted(topic):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO posts (topic, date) VALUES (?, ?)", (topic, date.today().isoformat()))
-    conn.commit()
-    conn.close()
-
-def get_today_post_count():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM posts WHERE date=?", (date.today().isoformat(),))
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+    print("Database ready")
 
 # ---------- TOPIC FUNCTIONS ----------
 def load_topics():
     if os.path.exists(TOPICS_FILE):
         with open(TOPICS_FILE, "r", encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
-    return ["📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်", "🔋 Battery health ကောင်းအောင်ထိန်းသိမ်းနည်း"]
+    return ["📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်"]
 
 def save_topics(topics):
     with open(TOPICS_FILE, "w", encoding="utf-8") as f:
@@ -87,10 +45,10 @@ def save_topics(topics):
 def add_topic(topic):
     topics = load_topics()
     if topic in topics:
-        return False, "❌ Topic ရှိပြီးသား"
+        return False, "❌ ရှိပြီးသား"
     topics.append(topic)
     save_topics(topics)
-    return True, f"✅ Topic ထည့်ပြီး\n{topic}"
+    return True, f"✅ ထည့်ပြီး\n{topic}"
 
 def remove_topic(index):
     topics = load_topics()
@@ -98,15 +56,15 @@ def remove_topic(index):
         removed = topics.pop(index - 1)
         save_topics(topics)
         return True, f"✅ ဖျက်ပြီး\n{removed}"
-    return False, "❌ မှားနေတယ်"
+    return False, "❌ မှားတယ်"
 
 def get_topics_list():
     topics = load_topics()
     if not topics:
-        return "📭 Topic မရှိသေး"
-    text = f"📚 Topic စာရင်း ({len(topics)} ခု)\n\n"
-    for i, topic in enumerate(topics[:50]):
-        text += f"{i+1}. {topic}\n"
+        return "📭 မရှိသေး"
+    text = f"📚 ({len(topics)} ခု)\n"
+    for i, t in enumerate(topics[:50]):
+        text += f"{i+1}. {t}\n"
     return text
 
 # ---------- GEMINI ----------
@@ -120,23 +78,26 @@ def gemini_request(prompt):
                 return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         except:
             time.sleep(2)
-    return "⚠️ AI Error"
+    return "AI Error"
 
 def generate_post(topic):
-    prompt = f"""မင်းက ဖုန်းဆိုင် page admin။ Facebook post ရေးပါ။
-Topic: {topic}
-စည်းကမ်း: emoji သုံး၊ bullet points 3-5 ခု၊ မြန်မာလို၊ စာလုံး 800 အောက်။
-အဆုံးမှာ 📱 မင်းမင်းဖုန်းဆိုင် - ဖုန်းအသစ်အစစ်များသာ ထည့်"""
+    prompt = f"""Facebook post ရေးပါ။ Topic: {topic}
+စည်းကမ်း: emoji သုံး၊ bullet 3-5 ခု၊ မြန်မာလို၊ 800 အောက်။
+အဆုံးမှာ 📱 မင်းမင်းဖုန်းဆိုင် ထည့်"""
     return gemini_request(prompt)
 
 def generate_image(prompt):
-    safe = urllib.parse.quote(f"smartphone advertisement, {prompt}")
+    safe = urllib.parse.quote(f"smartphone, {prompt}")
     url = f"https://image.pollinations.ai/prompt/{safe}?width=1024&height=1024"
     try:
         r = requests.get(url, timeout=60)
         return r.content if r.status_code == 200 else None
     except:
         return None
+
+def generate_new_topic():
+    prompt = "Write a short smartphone topic for Facebook post (max 60 chars, Myanmar language)"
+    return gemini_request(prompt)
 
 # ---------- TELEGRAM ----------
 def send_telegram(text, chat_id):
@@ -145,8 +106,8 @@ def send_telegram(text, chat_id):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": chat_id, "text": text[:4000]}, timeout=30)
-    except Exception as e:
-        logging.error(f"Send error: {e}")
+    except:
+        pass
 
 def send_photo(image_bytes, caption, chat_id):
     try:
@@ -168,23 +129,32 @@ def webhook():
         if chat_id != str(ADMIN_ID):
             return "Unauthorized", 403
         
-        logging.info(f"Command: {text}")
-        
-        # ----- COMMANDS -----
+        # ----- HELP -----
         if text in ["/start", "/help"]:
-            send_telegram("📱 Commands:\n/view_topics\n/add_topic [topic]\n/remove_topic [num]\n/write [topic]\n/write_topic [num]\n/random_post\n/status", chat_id)
+            send_telegram("""📱 **Commands**
+/view_topics - Topic စာရင်း
+/add_topic [topic] - Topic အသစ်
+/remove_topic [num] - Topic ဖျက်
+/write [topic] - Post ရေး
+/write_topic [num] - Topic ရွေးရေး
+/random_post - ကျပန်း
+/generate_topic - AI Topic အသစ်
+/status - Bot အခြေအနေ""", chat_id)
         
+        # ----- VIEW -----
         elif text == "/view_topics":
             send_telegram(get_topics_list(), chat_id)
         
+        # ----- ADD -----
         elif text.startswith("/add_topic"):
             topic = text.replace("/add_topic", "").strip()
             if not topic:
-                send_telegram("❌ Topic ထည့်ပါ", chat_id)
+                send_telegram("❌ /add_topic iPhone 16", chat_id)
             else:
                 ok, msg = add_topic(topic)
                 send_telegram(msg, chat_id)
         
+        # ----- REMOVE -----
         elif text.startswith("/remove_topic"):
             parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
@@ -193,6 +163,7 @@ def webhook():
                 ok, msg = remove_topic(int(parts[1]))
                 send_telegram(msg, chat_id)
         
+        # ----- WRITE TOPIC (by number) -----
         elif text.startswith("/write_topic"):
             parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
@@ -209,11 +180,12 @@ def webhook():
                         img = generate_image(topic)
                         if img:
                             send_photo(img, topic, chat_id)
-                    except Exception as e:
-                        send_telegram(f"❌ {e}", chat_id)
+                    except:
+                        send_telegram("❌ Fail", chat_id)
                 else:
                     send_telegram("❌ မရှိဘူး", chat_id)
         
+        # ----- WRITE CUSTOM -----
         elif text.startswith("/write"):
             topic = text.replace("/write", "").strip()
             if not topic:
@@ -226,9 +198,10 @@ def webhook():
                     img = generate_image(topic)
                     if img:
                         send_photo(img, topic, chat_id)
-                except Exception as e:
-                    send_telegram(f"❌ {e}", chat_id)
+                except:
+                    send_telegram("❌ Fail", chat_id)
         
+        # ----- RANDOM -----
         elif text == "/random_post":
             topics = load_topics()
             if not topics:
@@ -242,18 +215,27 @@ def webhook():
                     img = generate_image(topic)
                     if img:
                         send_photo(img, topic, chat_id)
-                except Exception as e:
-                    send_telegram(f"❌ {e}", chat_id)
+                except:
+                    send_telegram("❌ Fail", chat_id)
         
+        # ----- GENERATE TOPIC (AI) -----
+        elif text == "/generate_topic":
+            send_telegram("⏳ AI Topic ထုတ်နေပါတယ်...", chat_id)
+            try:
+                new_topic = generate_new_topic()
+                send_telegram(f"🤖 {new_topic}\n\n/add_topic {new_topic}", chat_id)
+            except:
+                send_telegram("❌ Fail", chat_id)
+        
+        # ----- STATUS -----
         elif text == "/status":
             topics = load_topics()
-            today_posts = get_today_post_count()
-            send_telegram(f"🤖 Bot Status\nTopics: {len(topics)}\nToday: {today_posts}\n✅ Running", chat_id)
+            send_telegram(f"🤖 Status\nTopics: {len(topics)}\n✅ Running", chat_id)
     
     return "OK", 200
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
-    init_db()  # <-- ဒါကို သေချာထည့်ထားပါ
+    init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
