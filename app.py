@@ -99,8 +99,7 @@ def generate_post(topic):
 စည်းကမ်း: 
 - emoji သုံးပါ
 - bullet points 3-5 ခု
-- မြန်မာဘာသာစကား သုံးပါ
-- Facebook မှာ မြန်ာမာနိုင်ငံ ဖုန်းဆိုင်များလို ရေးသားပါ
+- မြန်မာလို
 - စာလုံးရေ 800 အောက်"""
     return gemini_request(prompt)
 
@@ -182,15 +181,20 @@ def generate_image_with_fallback(prompt):
 def generate_image(prompt):
     return generate_image_with_fallback(prompt)
 
-# ---------- AI TOPIC GENERATOR (FIXED) ----------
-def generate_new_topic():
-    prompt = """Generate a short, specific smartphone-related topic for a Facebook post.
-Rules:
-- Must be a topic, not a full sentence or call-to-action
-- Max 60 characters
-- Myanmar language (Burmese)
-- Example: "📱 ဖုန်းဘက်ထရီ ကြာရှည်ခံအောင် ထိန်းသိမ်းနည်း"
-- Return ONLY the topic, nothing else."""
+# ---------- BULK TOPIC GENERATOR (10 topics at once) ----------
+def generate_topic_batch():
+    prompt = """Generate a list of 10 detailed, specific smartphone-related topics for Facebook posts.
+Requirements:
+- Each topic should be around 80-120 characters
+- Language: Myanmar (Burmese)
+- Should be informative and practical, like a mini-guide or tip
+- Start each topic with an emoji (📱, 🔋, 📸, 🖥️, ⚡, 🛡️, 💡, etc.)
+- Format: just the list, numbered 1 to 10, each on a new line, nothing else.
+- Example:
+1. 📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်
+2. 🔋 Battery health ကောင်းအောင်ထိန်းသိမ်းနည်း
+...
+"""
     return gemini_request(prompt)
 
 # ---------- TELEGRAM ----------
@@ -232,7 +236,7 @@ def webhook():
 /write [topic] - Post ရေး
 /write_topic [num] - Topic ရွေးရေး
 /random_post - ကျပန်း
-/generate_topic - AI Topic အသစ်
+/generate_topic - AI Topic (၁၀ ခု) အသစ်
 /status - Bot အခြေအနေ""", chat_id)
         
         # ----- VIEW -----
@@ -241,11 +245,11 @@ def webhook():
         
         # ----- ADD -----
         elif text.startswith("/add_topic"):
-            topic = text.replace("/add_topic", "").strip()
-            if not topic:
-                send_telegram("❌ /add_topic iPhone 16", chat_id)
+            param = text.replace("/add_topic", "").strip()
+            if not param:
+                send_telegram("❌ /add_topic [topic]\n\nExample: /add_topic 📱 ဖုန်းဘက်ထရီ အကြောင်း", chat_id)
             else:
-                ok, msg = add_topic(topic)
+                ok, msg = add_topic(param)
                 send_telegram(msg, chat_id)
         
         # ----- REMOVE -----
@@ -315,15 +319,21 @@ def webhook():
                     logging.error(f"Random post error: {e}")
                     send_telegram("❌ Fail", chat_id)
         
-        # ----- GENERATE TOPIC (AI) -----
+        # ----- GENERATE TOPIC (BATCH OF 10) -----
         elif text == "/generate_topic":
-            send_telegram("⏳ AI Topic ထုတ်နေပါတယ်...", chat_id)
+            send_telegram("⏳ AI က Topic စာရင်း (၁၂ ခု) ထုတ်နေပါတယ်...", chat_id)
             try:
-                new_topic = generate_new_topic()
-                send_telegram(f"🤖 {new_topic}\n\n/add_topic {new_topic}", chat_id)
+                topics_batch = generate_topic_batch()
+                message = f"🤖 **AI Generated Topics (12 topics)**\n\n{topics_batch}\n\nType `/add_topic <topic>` to add any topic above."
+                # Telegram message limit 4096 characters; split if necessary
+                if len(message) > 4096:
+                    for x in range(0, len(message), 4096):
+                        send_telegram(message[x:x+4096], chat_id)
+                else:
+                    send_telegram(message, chat_id)
             except Exception as e:
-                logging.error(f"Generate topic error: {e}")
-                send_telegram("❌ Fail", chat_id)
+                logging.error(f"Generate topic list error: {e}")
+                send_telegram("❌ Topic စာရင်း ထုတ်လို့မရပါ။ နောက်တစ်ခါ ထပ်ကြိုးစားပါ။", chat_id)
         
         # ----- STATUS -----
         elif text == "/status":
