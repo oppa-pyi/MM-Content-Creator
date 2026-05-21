@@ -70,7 +70,7 @@ def get_topics_list():
 
 # ---------- GEMINI ----------
 def gemini_request(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite-001:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     for _ in range(2):
         try:
@@ -99,7 +99,8 @@ def generate_post(topic):
 စည်းကမ်း: 
 - emoji သုံးပါ
 - bullet points 3-5 ခု
-- မြန်မာလို
+- မြန်မာဘာသာစကား သုံးပါ
+- Facebook မှာ မြန်ာမာနိုင်ငံ ဖုန်းဆိုင်များလို ရေးသားပါ
 - စာလုံးရေ 800 အောက်"""
     return gemini_request(prompt)
 
