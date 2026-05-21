@@ -6,6 +6,7 @@ import time
 import logging
 import sqlite3
 import base64
+import re
 from datetime import datetime, date
 from flask import Flask, request
 
@@ -18,6 +19,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ADMIN_ID = 1917675707
+MAX_TOPICS = 25  # အများဆုံး Topic အရေအတွက် (ကျော်ရင် အဟောင်းများကို အလိုအလျောက်ဖျက်)
 
 TOPICS_FILE = "topics.txt"
 DB_FILE = "bot_data.db"
@@ -31,7 +33,7 @@ def init_db():
     conn.close()
     logging.info("Database ready")
 
-# ---------- TOPIC FUNCTIONS ----------
+# ---------- TOPIC FUNCTIONS (with auto FIFO removal) ----------
 def load_topics():
     if os.path.exists(TOPICS_FILE):
         with open(TOPICS_FILE, "r", encoding="utf-8") as f:
@@ -43,13 +45,40 @@ def save_topics(topics):
         for topic in topics:
             f.write(topic + "\n")
 
-def add_topic(topic):
+def add_topic(topic, auto_remove=True):
+    """Topic အသစ်ထည့်ပြီး MAX_TOPICS ကျော်ရင် အဟောင်းဆုံးများကို ဖျက်ပေးတယ်"""
     topics = load_topics()
     if topic in topics:
-        return False, "❌ ရှိပြီးသား"
+        return False, "❌ Topic ရှိပြီးသားဖြစ်လို့ မထည့်ပါ။"
+    
     topics.append(topic)
+    
+    # FIFO: အရေအတွက်ကျော်နေရင် အရင်ဆုံး topic များကို ဖျက်မယ်
+    removed_count = 0
+    if auto_remove and len(topics) > MAX_TOPICS:
+        excess = len(topics) - MAX_TOPICS
+        removed_topics = topics[:excess]
+        topics = topics[excess:]
+        removed_count = len(removed_topics)
+    
     save_topics(topics)
-    return True, f"✅ ထည့်ပြီး\n{topic}"
+    
+    if removed_count > 0:
+        return True, f"✅ Topic ထည့်းပြီး\n{topic}\n\n🗑️ အဟောင်း {removed_count} ခုကို အလိုအလျောက်ဖျက်ပြီးပါပြီ။"
+    else:
+        return True, f"✅ Topic ထည့်ပြီး\n{topic}"
+
+def remove_oldest_topics(count):
+    """အရင်ဆုံး topic count ခုကို ဖျက်ပါ (manual သုံးဖို့)"""
+    topics = load_topics()
+    if count >= len(topics):
+        removed = topics.copy()
+        save_topics([])
+        return removed
+    else:
+        removed = topics[:count]
+        save_topics(topics[count:])
+        return removed
 
 def remove_topic(index):
     topics = load_topics()
@@ -57,13 +86,13 @@ def remove_topic(index):
         removed = topics.pop(index - 1)
         save_topics(topics)
         return True, f"✅ ဖျက်ပြီး\n{removed}"
-    return False, "❌ မှားတယ်"
+    return False, "❌ မှားယွင်းသောနံပါတ်"
 
 def get_topics_list():
     topics = load_topics()
     if not topics:
-        return "📭 မရှိသေး"
-    text = f"📚 ({len(topics)} ခု)\n"
+        return "📭 Topic မရှိသေးပါ။"
+    text = f"📚 စုစုပေါင်း ({len(topics)} / {MAX_TOPICS}) ခု\n"
     for i, t in enumerate(topics[:50]):
         text += f"{i+1}. {t}\n"
     return text
@@ -181,7 +210,7 @@ def generate_image_with_fallback(prompt):
 def generate_image(prompt):
     return generate_image_with_fallback(prompt)
 
-# ---------- BULK TOPIC GENERATOR (10 topics at once) ----------
+# ---------- BULK TOPIC GENERATOR (10 topics at once) & AUTO ADD ----------
 def generate_topic_batch():
     prompt = """Generate a list of 10 detailed, specific smartphone-related topics for Facebook posts.
 Requirements:
@@ -193,9 +222,25 @@ Requirements:
 - Example:
 1. 📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်
 2. 🔋 Battery health ကောင်းအောင်ထိန်းသိမ်းနည်း
-...
 """
     return gemini_request(prompt)
+
+def parse_topic_list(raw_text):
+    """AI ပေးလိုက်တဲ့ text ထဲက topic များကို extract လုပ်မယ်"""
+    topics = []
+    lines = raw_text.split('\n')
+    for line in lines:
+        line = line.strip()
+        # Numbered list: "1. topic text" or "1- topic text"
+        match = re.match(r'^\d+[\.\-]\s*(.+)$', line)
+        if match:
+            topic = match.group(1).strip()
+            if topic:
+                topics.append(topic)
+        else:
+            # Fallback: ignore lines without number
+            pass
+    return topics[:10]  # maximum 10
 
 # ---------- TELEGRAM ----------
 def send_telegram(text, chat_id):
@@ -229,14 +274,14 @@ def webhook():
         
         # ----- HELP -----
         if text in ["/start", "/help"]:
-            send_telegram("""📱 **Commands**
+            send_telegram(f"""📱 **Commands**
 /view_topics - Topic စာရင်း
-/add_topic [topic] - Topic အသစ်
+/add_topic [topic] - Topic အသစ် (Auto FIFO: max {MAX_TOPICS})
 /remove_topic [num] - Topic ဖျက်
 /write [topic] - Post ရေး
 /write_topic [num] - Topic ရွေးရေး
 /random_post - ကျပန်း
-/generate_topic - AI Topic (၁၀ ခု) အသစ်
+/generate_topic - AI Topic (၁၀ ခု) အသစ် + Auto Save
 /status - Bot အခြေအနေ""", chat_id)
         
         # ----- VIEW -----
@@ -319,18 +364,44 @@ def webhook():
                     logging.error(f"Random post error: {e}")
                     send_telegram("❌ Fail", chat_id)
         
-        # ----- GENERATE TOPIC (BATCH OF 10) -----
+        # ----- GENERATE TOPIC (BATCH OF 10) + AUTO ADD -----
         elif text == "/generate_topic":
-            send_telegram("⏳ AI က Topic စာရင်း (၁၂ ခု) ထုတ်နေပါတယ်...", chat_id)
+            send_telegram("⏳ AI က Topic စာရင်း (၁၀ ခု) ထုတ်နေပါတယ်...", chat_id)
             try:
-                topics_batch = generate_topic_batch()
-                message = f"🤖 **AI Generated Topics (12 topics)**\n\n{topics_batch}\n\nType `/add_topic <topic>` to add any topic above."
-                # Telegram message limit 4096 characters; split if necessary
-                if len(message) > 4096:
-                    for x in range(0, len(message), 4096):
-                        send_telegram(message[x:x+4096], chat_id)
-                else:
-                    send_telegram(message, chat_id)
+                raw_batch = generate_topic_batch()
+                topics_list = parse_topic_list(raw_batch)
+                
+                if not topics_list:
+                    send_telegram("❌ AI မှ Topic စာရင်း ပြန်မပို့နိုင်ပါ။ နောက်တစ်ခါ ထပ်ကြိုးစားပါ။", chat_id)
+                    return
+                
+                added = 0
+                duplicates = 0
+                added_topics = []
+                for t in topics_list:
+                    ok, msg = add_topic(t, auto_remove=True)
+                    if ok:
+                        added += 1
+                        added_topics.append(t)
+                    else:
+                        duplicates += 1
+                
+                result_msg = f"🤖 **AI Topic Generator**\n\n"
+                result_msg += f"✅ အသစ်ထည့်ပြီးသော Topic: {added} ခု\n"
+                if duplicates > 0:
+                    result_msg += f"⚠️ ထပ်နေသော Topic: {duplicates} ခု\n"
+                result_msg += f"📚 လက်ရှိ စုစုပေါင်း: {len(load_topics())} / {MAX_TOPICS}\n\n"
+                
+                # Show first 5 added topics
+                if added_topics:
+                    result_msg += f"**အသစ်ထည့်ထားသော Topic များ (ပထမ ၅ ခု):**\n"
+                    for i, t in enumerate(added_topics[:5], 1):
+                        result_msg += f"{i}. {t}\n"
+                    if len(added_topics) > 5:
+                        result_msg += f"... နှင့် {len(added_topics)-5} ခု\n"
+                
+                send_telegram(result_msg, chat_id)
+                
             except Exception as e:
                 logging.error(f"Generate topic list error: {e}")
                 send_telegram("❌ Topic စာရင်း ထုတ်လို့မရပါ။ နောက်တစ်ခါ ထပ်ကြိုးစားပါ။", chat_id)
@@ -338,7 +409,7 @@ def webhook():
         # ----- STATUS -----
         elif text == "/status":
             topics = load_topics()
-            send_telegram(f"🤖 Status\nTopics: {len(topics)}\n✅ Running", chat_id)
+            send_telegram(f"🤖 Status\nTopics: {len(topics)} / {MAX_TOPICS}\n✅ Running", chat_id)
     
     return "OK", 200
 
