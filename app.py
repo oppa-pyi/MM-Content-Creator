@@ -7,8 +7,6 @@ import logging
 import sqlite3
 import re
 import threading
-import json
-import subprocess
 from datetime import datetime, date
 from flask import Flask, request
 
@@ -117,24 +115,65 @@ Requirements:
 - Do NOT use markdown. Just plain text with line breaks."""
     return gemini_text_request(prompt)
 
-# ---------- IMAGE GENERATION (ClawHub Toolkit) ----------
-def generate_claw_image(prompt):
-    logging.info("Generating image via OpenClaw creative-toolkit...")
-    safe_prompt = prompt.replace('"', '\\"') 
-    command = f'claw run creative-toolkit:generate --prompt "{safe_prompt}"'
+# ---------- IMAGE GENERATION (MeiGen + Gemini Imagen) ----------
+def generate_meigen_image(prompt):
+    MEIGEN_TOKEN = os.environ.get("MEIGEN_API_TOKEN")
+    if not MEIGEN_TOKEN:
+        logging.warning("MeiGen token not found")
+        return None
+    
+    url = "https://api.meigen.ai/v1/images/generations"
+    headers = {
+        "Authorization": f"Bearer {MEIGEN_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "meigen-v1",
+        "prompt": prompt[:500],
+        "n": 1,
+        "size": "1024x1024"
+    }
     
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
-        output_data = json.loads(result.stdout)
-        image_url = output_data.get('image_url')
-        
-        if image_url:
-            r = requests.get(image_url, timeout=30)
-            if r.status_code == 200:
-                logging.info("Claw Toolkit: Success")
-                return r.content
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            image_url = data.get("data", [{}])[0].get("url")
+            if image_url:
+                img_response = requests.get(image_url, timeout=30)
+                if img_response.status_code == 200:
+                    logging.info("MeiGen: Success")
+                    return img_response.content
+        else:
+            logging.warning(f"MeiGen API error: {response.status_code}")
     except Exception as e:
-        logging.error(f"Claw Toolkit error: {e}")
+        logging.error(f"MeiGen error: {e}")
+    return None
+
+def generate_imagen_image(prompt):
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        for attempt in range(3):
+            try:
+                result = client.models.generate_images(
+                    model='imagen-3.0-generate-002',
+                    prompt=prompt[:300],
+                    config=types.GenerateImagesConfig(
+                        number_of_images=1,
+                        output_mime_type="image/jpeg",
+                        aspect_ratio="1:1",
+                    )
+                )
+                if result.generated_images:
+                    logging.info("Imagen 3.0: Success")
+                    return result.generated_images[0].image.image_bytes
+            except Exception as e:
+                logging.warning(f"Imagen attempt {attempt + 1} failed: {e}")
+                time.sleep(4)
+    except Exception as e:
+        logging.error(f"Imagen critical error: {e}")
     return None
 
 def generate_image_from_post(post_text):
@@ -145,7 +184,13 @@ def generate_image_from_post(post_text):
     short_prompt = f"realistic smartphone product photography, {clean_prompt[:100]}, 4k, high quality, white background, studio lighting"
     logging.info(f"Image prompt: {short_prompt}")
     
-    return generate_claw_image(short_prompt)
+    # Try MeiGen first, then Imagen
+    for generator in [generate_meigen_image, generate_imagen_image]:
+        img = generator(short_prompt)
+        if img:
+            return img
+    logging.error("Both image generators failed")
+    return None
 
 # ---------- BULK TOPIC GENERATION ----------
 def generate_topic_batch():
