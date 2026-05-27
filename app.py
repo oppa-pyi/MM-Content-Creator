@@ -9,7 +9,14 @@ import threading
 from datetime import datetime, date
 from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
-import openai
+
+# Try to import openai, but don't fail if not available
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    openai = None
 
 app = Flask(__name__)
 
@@ -40,38 +47,47 @@ def init_db():
     logging.info("Database ready")
 
 def log_analytics(topic, source="gemini"):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    now = datetime.now()
-    c.execute("INSERT INTO analytics (topic, generated_at, source) VALUES (?, ?, ?)",
-              (topic, now.isoformat(), source))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        now = datetime.now()
+        c.execute("INSERT INTO analytics (topic, generated_at, source) VALUES (?, ?, ?)",
+                  (topic[:200], now.isoformat(), source))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Analytics error: {e}")
 
 def get_analytics_summary():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT topic, COUNT(*) FROM analytics GROUP BY topic ORDER BY COUNT(*) DESC LIMIT 10")
-    results = c.fetchall()
-    conn.close()
-    
-    if not results:
-        return "📊 အချက်အလက် မရှိသေးပါ။"
-    
-    msg = "📊 **အသုံးအများဆုံး Topics**\n\n"
-    for i, (topic, count) in enumerate(results, 1):
-        msg += f"{i}. {topic[:40]}... ({count} ကြိမ်)\n"
-    return msg
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT topic, COUNT(*) FROM analytics GROUP BY topic ORDER BY COUNT(*) DESC LIMIT 10")
+        results = c.fetchall()
+        conn.close()
+        
+        if not results:
+            return "📊 အချက်အလက် မရှိသေးပါ။"
+        
+        msg = "📊 **အသုံးအများဆုံး Topics**\n\n"
+        for i, (topic, count) in enumerate(results, 1):
+            msg += f"{i}. {topic[:40]}... ({count} ကြိမ်)\n"
+        return msg
+    except Exception as e:
+        logging.error(f"Analytics summary error: {e}")
+        return "📊 Analytics error. Check logs."
 
 # ---------- TOPIC FUNCTIONS ----------
 def load_topics():
-    if os.path.exists(TOPICS_FILE):
-        with open(TOPICS_FILE, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip()]
+    try:
+        if os.path.exists(TOPICS_FILE):
+            with open(TOPICS_FILE, "r", encoding="utf-8") as f:
+                return [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        logging.error(f"Load topics error: {e}")
     return ["📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်"]
 
 def save_topics(topics):
-    """Force save topics to file - REPLACE all content"""
     try:
         with open(TOPICS_FILE, "w", encoding="utf-8") as f:
             for topic in topics:
@@ -83,6 +99,9 @@ def save_topics(topics):
         return False
 
 def add_topic(topic, auto_remove=True):
+    if not topic or len(topic) > 300:
+        return False, "❌ Topic က အရမ်းရှည်နေပါတယ် (max 300 characters)"
+    
     topics = load_topics()
     if topic in topics:
         return False, "❌ Topic ရှိပြီးသား"
@@ -112,82 +131,124 @@ def get_topics_list():
         return "📭 Topic မရှိသေးပါ။"
     text = f"📚 စုစုပေါင်း ({len(topics)} / {MAX_TOPICS}) ခု\n"
     for i, t in enumerate(topics[:50]):
-        text += f"{i+1}. {t}\n"
+        text += f"{i+1}. {t[:80]}\n"
     return text
 
 # ---------- SHOP INFO ----------
 def load_shop_info():
-    if os.path.exists("shop_info.txt"):
-        with open("shop_info.txt", "r", encoding="utf-8") as f:
-            return f.read().strip()
+    try:
+        if os.path.exists("shop_info.txt"):
+            with open("shop_info.txt", "r", encoding="utf-8") as f:
+                return f.read().strip()
+    except Exception as e:
+        logging.error(f"Load shop info error: {e}")
     return ""
 
-# ---------- MULTI AI MODEL (Gemini + ChatGPT Fallback) ----------
+# ---------- AI MODEL FUNCTIONS ----------
 def gemini_request(prompt):
     if not GEMINI_API_KEY:
+        logging.warning("Gemini: No API key")
         return None
+    
+    # Clean prompt - remove very long content
+    if len(prompt) > 3000:
+        prompt = prompt[:3000]
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
-    for _ in range(3):
+    
+    for attempt in range(3):
         try:
-            r = requests.post(url, json=data, timeout=60)
+            r = requests.post(url, json=data, timeout=90)
             if r.status_code == 200:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                result = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                if result and len(result) > 10:
+                    return result
+                else:
+                    logging.warning(f"Gemini returned short/empty response: {result}")
+            else:
+                logging.error(f"Gemini HTTP {r.status_code}: {r.text[:200]}")
+        except requests.Timeout:
+            logging.error(f"Gemini timeout (attempt {attempt+1})")
         except Exception as e:
-            logging.error(f"Gemini error: {e}")
-        time.sleep(3)
+            logging.error(f"Gemini error (attempt {attempt+1}): {e}")
+        time.sleep(5)
     return None
 
 def openai_request(prompt):
-    if not OPENAI_API_KEY:
+    if not OPENAI_API_KEY or not OPENAI_AVAILABLE:
         return None
+    
+    # Clean prompt
+    if len(prompt) > 3000:
+        prompt = prompt[:3000]
+    
     openai.api_key = OPENAI_API_KEY
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1000,
+            timeout=60
         )
-        return response.choices[0].message.content
+        result = response.choices[0].message.content
+        if result and len(result) > 10:
+            return result
     except Exception as e:
         logging.error(f"OpenAI error: {e}")
-        return None
+    return None
 
 def ai_request(prompt):
     """Try Gemini first, then OpenAI as fallback"""
-    result = gemini_request(prompt)
-    if result:
-        return result, "gemini"
-    result = openai_request(prompt)
-    if result:
-        return result, "openai"
-    return "AI Error: Both models failed", None
+    logging.info(f"AI Request - Prompt length: {len(prompt)}")
+    
+    try:
+        result = gemini_request(prompt)
+        if result and "Error" not in result and len(result) > 10:
+            return result, "gemini"
+    except Exception as e:
+        logging.error(f"Gemini exception: {e}")
+    
+    try:
+        result = openai_request(prompt)
+        if result and "Error" not in result and len(result) > 10:
+            return result, "openai"
+    except Exception as e:
+        logging.error(f"OpenAI exception: {e}")
+    
+    return "AI Error: Both models failed. Please try again with shorter topic.", None
 
 # ---------- POST + PROMPT GENERATION ----------
 def generate_post_and_prompt(topic):
+    # Shorten topic if too long
+    if len(topic) > 150:
+        topic = topic[:147] + "..."
+    
     shop_info = load_shop_info()
+    if len(shop_info) > 500:
+        shop_info = shop_info[:500]
     
     prompt = f"""You are a professional Facebook content writer for a phone shop in Myanmar.
 
 Shop Information (use this naturally in your post):
 {shop_info}
 
-Task: Write TWO things about: {topic}
+Task: Write TWO things about this topic: {topic}
 
 PART 1 - POST CONTENT:
 Write a Facebook post (Burmese/Myanmar language)
 - Use emojis naturally
-- Include 3-5 bullet points
-- Keep under 800 characters
+- Include 3-5 bullet points (• or -)
+- Keep under 600 characters
 - Sound friendly and engaging
 - Weave the shop info naturally into the post
 - Do NOT use markdown
 - Do NOT include any title like "Post Content". Just the post itself.
 
 PART 2 - IMAGE PROMPT:
-Write a short, detailed English prompt (max 250 characters) for generating an image.
-Include shop info naturally in the prompt.
+Write a short, detailed English prompt (max 200 characters) for generating an image.
+Include shop name naturally in the prompt.
 
 FORMAT:
 [POST]
@@ -201,23 +262,38 @@ Return ONLY this format."""
     
     response, source = ai_request(prompt)
     
-    post_match = re.search(r'\[POST\](.*?)\[/POST\]', response, re.DOTALL)
-    prompt_match = re.search(r'\[PROMPT\](.*?)\[/PROMPT\]', response, re.DOTALL)
+    if "AI Error" in response:
+        return response, "", source
     
-    post_content = post_match.group(1).strip() if post_match else (response[:800] if response else "AI Error")
-    image_prompt = prompt_match.group(1).strip() if prompt_match else f"realistic smartphone product photo, {topic}, {shop_info}, 4k, studio lighting"
+    # Parse response
+    post_content = ""
+    image_prompt = ""
+    
+    post_match = re.search(r'\[POST\](.*?)\[/POST\]', response, re.DOTALL)
+    if post_match:
+        post_content = post_match.group(1).strip()[:800]
+    
+    prompt_match = re.search(r'\[PROMPT\](.*?)\[/PROMPT\]', response, re.DOTALL)
+    if prompt_match:
+        image_prompt = prompt_match.group(1).strip()[:250]
+    
+    # Fallback
+    if not post_content:
+        post_content = f"📱 {topic}\n\nအသေးစိတ်အချက်အလက်များအတွက် ဆိုင်သို့ ဆက်သွယ်မေးမြန်းနိုင်ပါတယ်။\n\n{shop_info[:200]}"
+    if not image_prompt:
+        image_prompt = f"realistic smartphone product photo, {topic[:80]}, 4k, studio lighting"
     
     return post_content, image_prompt, source
 
-# ---------- DALL-E IMAGE ----------
+# ---------- DALL-E IMAGE (Optional) ----------
 def generate_dalle_image(prompt):
-    if not OPENAI_API_KEY:
+    if not OPENAI_API_KEY or not OPENAI_AVAILABLE:
         return None
     openai.api_key = OPENAI_API_KEY
     try:
         response = openai.Image.create(
             model="dall-e-3",
-            prompt=prompt[:1000],
+            prompt=prompt[:500],
             n=1,
             size="1024x1024",
             quality="standard"
@@ -229,10 +305,10 @@ def generate_dalle_image(prompt):
         logging.error(f"DALL-E error: {e}")
         return None
 
-# ---------- BULK TOPIC GENERATION (REPLACE ALL) ----------
+# ---------- BULK TOPIC GENERATION ----------
 def generate_topic_batch():
     prompt = """Generate a list of 10 detailed, specific smartphone-related topics for Facebook posts.
-Each topic should be 80-120 characters, Myanmar language, start with an emoji.
+Each topic should be 50-80 characters, Myanmar language, start with an emoji.
 Format: numbered list 1 to 10, nothing else.
 Example:
 1. 📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်
@@ -247,25 +323,33 @@ def parse_topic_list(raw_text):
         match = re.match(r'^\d+[\.\-]\s*(.+)$', line)
         if match:
             topic = match.group(1).strip()
-            if topic:
+            if topic and len(topic) < 150:
                 topics.append(topic)
     return topics[:10]
 
 # ---------- TELEGRAM HELPERS ----------
 def send_telegram(text, chat_id):
-    if not chat_id:
+    if not chat_id or not text:
         return
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                      json={"chat_id": chat_id, "text": text[:4000]}, timeout=30)
+        # Split long messages
+        if len(text) > 4000:
+            for i in range(0, len(text), 4000):
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                              json={"chat_id": chat_id, "text": text[i:i+4000]}, timeout=30)
+        else:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                          json={"chat_id": chat_id, "text": text}, timeout=30)
     except Exception as e:
         logging.error(f"Telegram send error: {e}")
 
 def send_photo(image_bytes, caption, chat_id):
+    if not image_bytes:
+        return
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
                       files={"photo": ("image.jpg", image_bytes)},
-                      data={"chat_id": chat_id, "caption": caption[:200]}, timeout=60)
+                      data={"chat_id": chat_id, "caption": (caption or "")[:200]}, timeout=60)
     except Exception as e:
         logging.error(f"Photo send error: {e}")
 
@@ -273,10 +357,19 @@ def send_photo(image_bytes, caption, chat_id):
 def handle_post_generation(topic, chat_id, auto_image=False):
     def task():
         try:
-            send_telegram(f"⏳ ထုတ်နေပါတယ်... {topic}", chat_id)
-            post_content, image_prompt, source = generate_post_and_prompt(topic)
-            log_analytics(topic, source)
+            # Check topic length
+            if len(topic) > 300:
+                send_telegram(f"⚠️ Topic က {len(topic)} လုံးရှည်နေပါတယ်။ ကျေးဇူးပြု၍ အတိုချုံးပါ။", chat_id)
+                return
             
+            send_telegram(f"⏳ ထုတ်နေပါတယ်... {topic[:80]}...", chat_id)
+            post_content, image_prompt, source = generate_post_and_prompt(topic)
+            
+            if "AI Error" in post_content:
+                send_telegram(f"❌ {post_content}", chat_id)
+                return
+            
+            log_analytics(topic, source)
             send_telegram(post_content, chat_id)
             send_telegram(f"🖼️ **Image Prompt** (AI: {source})\n\n`{image_prompt}`", chat_id)
             
@@ -287,7 +380,7 @@ def handle_post_generation(topic, chat_id, auto_image=False):
                     send_photo(img, post_content[:200], chat_id)
         except Exception as e:
             logging.error(f"Generation error: {e}")
-            send_telegram("❌ ထုတ်လို့မရပါ။", chat_id)
+            send_telegram(f"❌ ထုတ်လို့မရပါ။ Error: {str(e)[:100]}", chat_id)
     threading.Thread(target=task, daemon=True).start()
 
 # ---------- AUTO SCHEDULE (4 times per day) ----------
@@ -298,18 +391,24 @@ def auto_post_to_channel():
         logging.warning("No topics for auto post")
         return
     
-    topic = random.choice(topics)
+    # Try up to 3 times to find a working topic
+    for _ in range(3):
+        topic = random.choice(topics)
+        if len(topic) < 150:
+            break
+    
     post_content, image_prompt, source = generate_post_and_prompt(topic)
-    log_analytics(topic, f"{source}_auto")
     
-    now = datetime.now().strftime("%H:%M")
-    send_telegram(f"⏰ **Auto Post - {now}**\n\n{post_content}", TELEGRAM_CHAT_ID)
-    send_telegram(f"🖼️ **Image Prompt** (AI: {source})\n\n`{image_prompt}`", TELEGRAM_CHAT_ID)
-    
-    if OPENAI_API_KEY:
-        img = generate_dalle_image(image_prompt)
-        if img:
-            send_photo(img, post_content[:200], TELEGRAM_CHAT_ID)
+    if "AI Error" not in post_content:
+        log_analytics(topic, f"{source}_auto")
+        now = datetime.now().strftime("%H:%M")
+        send_telegram(f"⏰ **Auto Post - {now}**\n\n{post_content}", TELEGRAM_CHAT_ID)
+        send_telegram(f"🖼️ **Image Prompt** (AI: {source})\n\n`{image_prompt}`", TELEGRAM_CHAT_ID)
+        
+        if OPENAI_API_KEY:
+            img = generate_dalle_image(image_prompt)
+            if img:
+                send_photo(img, post_content[:200], TELEGRAM_CHAT_ID)
 
 # ---------- WEBHOOK ----------
 @app.route(f"/webhook/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
@@ -322,6 +421,8 @@ def webhook():
         
         if chat_id != str(ADMIN_ID):
             return "Unauthorized", 403
+        
+        logging.info(f"Command: {text[:100]}")
         
         if text in ["/start", "/help"]:
             send_telegram(f"""📱 **Commands**
@@ -390,7 +491,7 @@ def webhook():
                 send_telegram("❌ Topic မရှိပါ", chat_id)
             else:
                 topic = random.choice(topics)
-                send_telegram(f"🎲 Random topic: {topic}", chat_id)
+                send_telegram(f"🎲 Random topic: {topic[:80]}", chat_id)
                 handle_post_generation(topic, chat_id, auto_image=False)
         
         elif text == "/generate_topic":
@@ -403,14 +504,13 @@ def webhook():
                     send_telegram("❌ Topic ထုတ်လို့မရပါ။ နောက်တစ်ခါ ထပ်ကြိုးစားပါ။", chat_id)
                     return "OK", 200
                 
-                # 🔥 FORCE SAVE - အဟောင်းအကုန်ဖျက်၊ အသစ် ၁၀ ခု သိမ်းမယ်
                 success = save_topics(topics_list)
                 
                 if success:
                     verify_topics = load_topics()
                     result_msg = f"🤖 **AI Topic Generator**\n\n✅ Topic အသစ် {len(verify_topics)} ခု အောင်မြင်စွာ သိမ်းဆည်းပြီးပါပြီ။\n\n**Topic အသစ်များ:**\n"
                     for i, t in enumerate(verify_topics[:10], 1):
-                        result_msg += f"{i}. {t}\n"
+                        result_msg += f"{i}. {t[:80]}\n"
                     send_telegram(result_msg, chat_id)
                 else:
                     send_telegram("❌ Topic ထုတ်လို့ရပေမယ့် ဖိုင်သိမ်းရာမှာ အမှားရှိနေပါတယ်။", chat_id)
@@ -426,7 +526,7 @@ def webhook():
                 models.append("Gemini")
             if OPENAI_API_KEY:
                 models.append("ChatGPT/DALL-E")
-            send_telegram(f"🤖 Bot Status\nTopics: {len(topics)} / {MAX_TOPICS}\nAI Models: {', '.join(models)}\n✅ အလုပ်လုပ်နေပါတယ်", chat_id)
+            send_telegram(f"🤖 Bot Status\nTopics: {len(topics)} / {MAX_TOPICS}\nAI Models: {', '.join(models) if models else 'None'}\n✅ အလုပ်လုပ်နေပါတယ်", chat_id)
     
     return "OK", 200
 
@@ -435,13 +535,16 @@ if __name__ == "__main__":
     init_db()
     
     # Start scheduler for 4 times daily
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=9, minute=0)
-    scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=13, minute=0)
-    scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=17, minute=0)
-    scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=21, minute=0)
-    scheduler.start()
-    logging.info("Auto scheduler started - Daily posts at 9:00, 13:00, 17:00, 21:00")
+    try:
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=9, minute=0)
+        scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=13, minute=0)
+        scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=17, minute=0)
+        scheduler.add_job(func=auto_post_to_channel, trigger="cron", hour=21, minute=0)
+        scheduler.start()
+        logging.info("Auto scheduler started - Daily posts at 9:00, 13:00, 17:00, 21:00")
+    except Exception as e:
+        logging.error(f"Scheduler error: {e}")
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
