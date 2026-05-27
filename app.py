@@ -40,7 +40,6 @@ def load_topics():
     return ["📱 ဖုန်းအသစ်ဝယ်မယ်ဆို သိထားသင့်တဲ့အချက် ၅ ချက်"]
 
 def save_topics(topics):
-    """လုံးဝအစားထိုးသိမ်းမယ်"""
     with open(TOPICS_FILE, "w", encoding="utf-8") as f:
         for topic in topics:
             f.write(topic + "\n")
@@ -85,7 +84,7 @@ def load_shop_info():
             return f.read().strip()
     return ""
 
-# ---------- GEMINI REQUEST (Text Generation) ----------
+# ---------- GEMINI REQUEST ----------
 def gemini_request(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -99,7 +98,7 @@ def gemini_request(prompt):
         time.sleep(3)
     return "AI Error"
 
-# ---------- POST + PROMPT GENERATION (တစ်ခါခိုင်း နှစ်ခုထွက်) ----------
+# ---------- POST + PROMPT GENERATION ----------
 def generate_post_and_prompt(topic):
     shop_info = load_shop_info()
     
@@ -118,11 +117,14 @@ Write a Facebook post (Burmese/Myanmar language)
 - Sound friendly and engaging
 - Weave the shop info naturally into the post (NOT just copied at the end)
 - Do NOT use markdown
+- Do NOT include any title like "Post Content" or headers. Just the post itself.
 
 PART 2 - IMAGE PROMPT:
-Write a short, detailed English prompt (max 200 characters) for generating an image.
+Write a short, detailed English prompt (max 250 characters) for generating an image.
 This will be used by an AI image generator (DALL-E, Imagen, or Stable Diffusion).
 The prompt should describe a realistic smartphone product photo based on the topic.
+CRITICAL: Include the following shop information in the prompt naturally:
+{shop_info}
 
 FORMAT:
 [POST]
@@ -152,7 +154,7 @@ Return ONLY this format, nothing else."""
     if not post_content:
         post_content = response[:800]
     if not image_prompt:
-        image_prompt = f"realistic smartphone product photo, {topic}, 4k, studio lighting"
+        image_prompt = f"realistic smartphone product photo, {topic}, {shop_info}, 4k, studio lighting"
     
     return post_content, image_prompt
 
@@ -187,14 +189,17 @@ def send_telegram(text, chat_id):
     except Exception as e:
         logging.error(f"Telegram send error: {e}")
 
-# ---------- BACKGROUND POST HANDLER (ဆက်တိုက်မပို့ရန်) ----------
+# ---------- BACKGROUND HANDLER ----------
 def handle_post_generation(topic, chat_id):
     def task():
         try:
             send_telegram(f"⏳ ထုတ်နေပါတယ်... {topic}", chat_id)
             post_content, image_prompt = generate_post_and_prompt(topic)
             
-            send_telegram(f"📝 **Post Content**\n\n{post_content}", chat_id)
+            # Send Post Content (without any title)
+            send_telegram(post_content, chat_id)
+            
+            # Send Image Prompt
             send_telegram(f"🖼️ **Image Prompt**\n\n`{image_prompt}`", chat_id)
             
         except Exception as e:
@@ -272,7 +277,6 @@ def webhook():
                 send_telegram(f"🎲 Random topic: {topic}", chat_id)
                 handle_post_generation(topic, chat_id)
         
-        # 🔥 GENERATE TOPIC - REPLACE ALL (အဟောင်းအကုန်ဖျက်)
         elif text == "/generate_topic":
             send_telegram("⏳ AI က Topic ၁၀ ခု ထုတ်နေပါတယ်... (အဟောင်းများ အကုန်ဖျက်ပါမည်)", chat_id)
             try:
@@ -283,7 +287,6 @@ def webhook():
                     send_telegram("❌ Topic ထုတ်လို့မရပါ။ နောက်တစ်ခါ ထပ်ကြိုးစားပါ။", chat_id)
                     return "OK", 200
                 
-                # 🔥 အဟောင်းအကုန်ဖျက်၊ အသစ် ၁၀ ခုပဲထည့်
                 save_topics(topics_list)
                 
                 result_msg = f"🤖 **AI Topic Generator**\n\n✅ အဟောင်း အားလုံးဖျက်ပြီး Topic အသစ် {len(topics_list)} ခု ထည့်ပြီးပါပြီ။\n\n**Topic အသစ်များ:**\n"
